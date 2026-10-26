@@ -1,7 +1,12 @@
 #!/bin/bash
-# 错误日志监控：扫描指定命名空间下所有 Pod 的错误日志目录，
-# 按工作负载（Deployment/StatefulSet 等）聚合后推送企业微信摘要，
-# 同时把每个工作负载的最新日志快照写入页面数据目录（仅保留当天）。
+# 错误日志监控：按 RECENT_WINDOW_MINUTES 窗口巡检，按工作负载（Deployment/StatefulSet 等）聚合后
+# 推送企业微信摘要，同时把每个副本的最新日志快照写入页面数据目录。
+#
+# 告警降噪：
+#   1. 首次发现错误立即告警；
+#   2. 持续有新增错误时，同一工作负载每 RENOTIFY_HOURS 小时最多提醒一次；
+#   3. 连续 RECOVERY_MINUTES 分钟无新增错误后发送一次恢复通知，并清除页面记录；
+#   4. 恢复后再次报错按首次发现处理，立即告警。
 set -uo pipefail
 
 CONFIG_FILE="${CONFIG_FILE:-/config/monitor.env}"
@@ -12,7 +17,6 @@ fi
 
 : "${CLUSTER_NAME:=cn-prod}"
 : "${ERROR_LOG_DIR:=/tmp/logs/error}"
-: "${CHECK_INTERVAL_HOURS:=2}"
 : "${MAX_MESSAGES:=20}"
 : "${INCLUDE_NAMESPACES:=}"
 : "${EXCLUDE_NAMESPACES:=kube-system,kube-public,kube-node-lease}"
@@ -22,22 +26,22 @@ fi
 : "${WEB_BASE_URL:=}"
 : "${DATA_DIR:=/www/data}"
 : "${SNAPSHOT_LINES:=2000}"
-: "${ALERT_HOURS:=9,11,13,15,17}"
+: "${RECENT_WINDOW_MINUTES:=5}"
+: "${RECOVERY_MINUTES:=20}"
+: "${RENOTIFY_HOURS:=2}"
+: "${ACTIVE_HOURS:=9-17}"
 
-# 启动时的首次扫描只负责填充页面数据；仅在告警时间点的前 15 分钟内推送企微
+# ACTIVE_HOURS=9-17 表示 09:00-17:59（含两端的小时）；时段外只更新页面与状态，不推送
 SEND_ALLOWED=false
-IFS=',' read -r -a ALERT_HOUR_LIST <<< "$ALERT_HOURS"
-CUR_HOUR=$((10#$(date +%H)))
-CUR_MIN=$((10#$(date +%M)))
-for _h in "${ALERT_HOUR_LIST[@]}"; do
-  if [ "$CUR_HOUR" -eq "$((10#$_h))" ] && [ "$CUR_MIN" -lt 15 ]; then SEND_ALLOWED=true; fi
-done
+_h=$((10#$(date +%H)))
+_hs=${ACTIVE_HOURS%%-*}
+_he=${ACTIVE_HOURS##*-}
+if [ "$_h" -ge "$((10#$_hs))" ] && [ "$_h" -le "$((10#$_he))" ]; then SEND_ALLOWED=true; fi
 
 NOW=$(date +%s)
-START=$(( NOW - CHECK_INTERVAL_HOURS * 3600 - 600 ))   # 窗口额外加 10 分钟容差
+SINCE=$(( NOW - RECENT_WINDOW_MINUTES * 60 ))
 SCAN_TIME=$(date '+%F %T')
 TODAY=$(date '+%F')
-SCAN_ID=$(date '+%Y%m%d%H%M%S')
 
 log() { echo "[$(date '+%F %T')] $*"; }
 
@@ -78,7 +82,7 @@ for f in *.log; do
   [ "$mt" -ge "$since" ] || continue
   cnt=$(( cnt + 1 ))
   if [ "$mt" -gt "$newest_mt" ]; then
-    newest="$f"; newest_mt="$mt"; newest_sz=$(wc -c < "$f" | tr -d ' ')
+    newest="$f"; newest_mt=$mt; newest_sz=$(wc -c < "$f" | tr -d ' ')
   fi
 done
 [ "$cnt" -gt 0 ] || exit 4
@@ -93,7 +97,77 @@ echo "@@LOGS-END"
 EOS
 
 META_FILE="$DATA_DIR/alerts.json"
+STATE_FILE="$DATA_DIR/state.json"
 mkdir -p "$DATA_DIR/logs" 2>/dev/null || true
+
+# ---- 状态文件：记录每个工作负载的告警状态，Pod 重建后随内存卷一起丢失 ----
+state_init() {
+  if [ ! -s "$STATE_FILE" ]; then
+    printf '{"updated_at":"","workloads":{}}\n' > "$STATE_FILE" 2>/dev/null || true
+  fi
+}
+
+# 输出（tab 分隔）：alerted last_alert_ts last_mtime last_mtime_str id namespace workload file hits
+state_get() {
+  jq -r --arg k "$1" '
+    (.workloads[$k] // empty)
+    | [ (.alerted // false), (.last_alert_ts // 0), (.last_mtime // 0), (.last_mtime_str // ""),
+        (.id // ""), (.namespace // ""), (.workload // ""), (.file // ""), (.hits // 0) ]
+    | @tsv' "$STATE_FILE" 2>/dev/null
+}
+
+state_set() {  # wkey ns wl alerted last_alert_ts last_mtime last_mtime_str id file hits
+  local wkey="$1" ns="$2" wl="$3" alerted="$4" lts="$5" lmt="$6" lmstr="$7" id="$8" file="$9" hits="${10}"
+  local tmp="$STATE_FILE.tmp.$$"
+  if jq --arg k "$wkey" --arg now "$SCAN_TIME" --argjson now_ts "$NOW" \
+      --arg ns "$ns" --arg wl "$wl" --argjson alerted "$alerted" --argjson lts "$lts" \
+      --argjson lmt "$lmt" --arg lmstr "$lmstr" --arg id "$id" --arg file "$file" --argjson hits "$hits" '
+      .updated_at = $now
+      | .workloads = (.workloads // {})
+      | .workloads[$k] = {
+          namespace:$ns, workload:$wl, alerted:$alerted,
+          last_alert_ts:$lts, last_seen_ts:$now_ts, last_seen_str:$now,
+          last_mtime:$lmt, last_mtime_str:$lmstr,
+          id:$id, file:$file, hits:$hits }
+    ' "$STATE_FILE" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$STATE_FILE"
+  else
+    rm -f "$tmp"
+    log "写入状态失败：$wkey"
+  fi
+}
+
+state_remove() {  # wkey
+  local tmp="$STATE_FILE.tmp.$$"
+  if jq --arg k "$1" --arg now "$SCAN_TIME" '
+      .updated_at = $now
+      | .workloads = ((.workloads // {}) | del(.[$k]))
+    ' "$STATE_FILE" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$STATE_FILE"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+# 删除页面记录及其日志快照
+drop_record() {  # id
+  local id="$1" tmp="$META_FILE.tmp.$$" s
+  [ -z "$id" ] && return 0
+  [ -s "$META_FILE" ] || return 0
+  while IFS= read -r s; do
+    [ -n "$s" ] && rm -f "$DATA_DIR/logs/$s.json" 2>/dev/null
+  done < <(jq -r --arg i "$id" '(.alerts // [])[] | select(.id == $i) | (.sources // [])[]? | .snapshot // empty' "$META_FILE" 2>/dev/null)
+  if jq --arg i "$id" --arg now "$SCAN_TIME" '
+      .alerts = ((.alerts // []) | map(select(.id != $i)))
+      | .updated_at = $now
+    ' "$META_FILE" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$META_FILE"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+state_init
 
 # 跨天时清空前一日的快照，页面只展示当天记录
 prev_date=""
@@ -123,11 +197,7 @@ for ns in "${ALL_NS[@]}"; do
   [ "$skip" = "0" ] && NS_LIST+=("$ns")
 done
 
-log "扫描命名空间：${NS_LIST[*]:-<无>}，窗口 ${CHECK_INTERVAL_HOURS} 小时，快照 ${SNAPSHOT_LINES} 行"
-
-sent=0
-attempts=0
-skipped_by_limit=0
+log "扫描命名空间：${NS_LIST[*]:-<无>}，窗口 ${RECENT_WINDOW_MINUTES} 分钟，快照 ${SNAPSHOT_LINES} 行，告警发送=$SEND_ALLOWED"
 
 # 同一工作负载（Deployment/StatefulSet 等）的多个 Pod 聚合为一条告警
 declare -A POD_WL=() RS_WL=()
@@ -170,7 +240,7 @@ for ns in "${NS_LIST[@]}"; do
       [ -z "$c" ] && continue
       if printf '%s' "$c" | grep -qE "$EXCLUDE_CONTAINERS"; then continue; fi
 
-      raw=$(timeout 40 kubectl exec -n "$ns" "$pod" -c "$c" -- sh -c "$PROBE" sh "$ERROR_LOG_DIR" "$START" "$SNAPSHOT_LINES" 2>/dev/null)
+      raw=$(timeout 40 kubectl exec -n "$ns" "$pod" -c "$c" -- sh -c "$PROBE" sh "$ERROR_LOG_DIR" "$SINCE" "$SNAPSHOT_LINES" 2>/dev/null)
       rc=$?
       if [ $rc -eq 4 ]; then continue; fi          # 窗口内无变更
       if [ $rc -ne 0 ]; then
@@ -240,13 +310,12 @@ for ns in "${NS_LIST[@]}"; do
   done
 done
 
-# ---- 按工作负载逐条写入页面数据并发送告警 ----
+# ---- 按工作负载逐条写入页面数据并按状态机发送告警 ----
 found_total=${#AGG_ORDER[@]}
-idx=0
-for wkey in "${AGG_ORDER[@]}"; do
-  idx=$(( idx + 1 ))
-  id="${SCAN_ID}-$(printf '%02d' "$idx")"
+sent=0
+skipped_by_limit=0
 
+for wkey in "${AGG_ORDER[@]}"; do
   wns="${wkey%%|*}"; wl="${wkey#*|}"
   rpod="${AGG_REP_POD[$wkey]}"; rctr="${AGG_REP_CTR[$wkey]}"
   rfname="${AGG_FILE[$wkey]}"; rsize="${AGG_SIZE[$wkey]}"
@@ -255,8 +324,10 @@ for wkey in "${AGG_ORDER[@]}"; do
   hits="${AGG_HITS[$wkey]}"; pods="${AGG_PODS[$wkey]}"; ctrs="${AGG_CTRS[$wkey]}"
   [ -z "$rmstr" ] && rmstr="$rmt"
 
+  # 记录 id 按工作负载固定，页面链接在多次巡检之间保持稳定
+  rid="w-$(printf '%s' "$wkey" | cksum | cut -d' ' -f1)"
   if [ -n "$WEB_BASE_URL" ]; then
-    link="${WEB_BASE_URL}/#/alert/${id}"
+    link="${WEB_BASE_URL}/#/alert/${rid}"
   else
     link=""
   fi
@@ -264,8 +335,8 @@ for wkey in "${AGG_ORDER[@]}"; do
   pods_json=$(printf '%s' "$pods" | jq -R 'split(",") | map(select(length > 0))')
   ctrs_json=$(printf '%s' "$ctrs" | jq -R 'split(",") | map(select(length > 0))')
 
-  # 为该工作负载下的每个 Pod/容器 各生成一份快照与副本元数据
-  src_jsonl="$SCAN_TMP/sources-$id.jsonl"
+  # 为该工作负载下的每个 Pod/容器 各生成一份快照与副本元数据（文件名固定，每次覆盖）
+  src_jsonl="$SCAN_TMP/sources-$rid.jsonl"
   : > "$src_jsonl"
   src_count=0
   total_err=0
@@ -273,12 +344,13 @@ for wkey in "${AGG_ORDER[@]}"; do
   for ((si=0; si<${#SRC_ORDER[@]}; si++)); do
     [ "${SRC_WKEY[$si]:-}" = "$wkey" ] || continue
     src_count=$(( src_count + 1 ))
-    sid="$id-$(printf '%02d' "$src_count")"
     spod="${SRC_POD[$si]}"; sctr="${SRC_CTR[$si]}"
     sfile="${SRC_FILE[$si]}"; smt="${SRC_MTIME[$si]}"
     smstr="${SRC_MTIME_STR[$si]:-}"; ssize="${SRC_SIZE[$si]}"
     sfc="${SRC_FCOUNT[$si]}"; sbody="${SRC_BODY_FILE[$si]}"
     [ -z "$smstr" ] && smstr="$smt"
+
+    sid="s-$(printf '%s' "$wkey|$spod|$sctr" | cksum | cut -d' ' -f1)"
 
     serr=$(grep -c 'ERROR' "$sbody" 2>/dev/null || true)
     sexc=$(grep -ci 'exception' "$sbody" 2>/dev/null || true)
@@ -308,7 +380,7 @@ for wkey in "${AGG_ORDER[@]}"; do
   done
 
   rec=$(jq -n \
-    --arg id "$id" --arg cluster "$CLUSTER_NAME" --arg ns "$wns" --arg workload "$wl" \
+    --arg id "$rid" --arg cluster "$CLUSTER_NAME" --arg ns "$wns" --arg workload "$wl" \
     --arg file "$rfname" --argjson pods "$pods_json" --argjson containers "$ctrs_json" \
     --argjson hits "$hits" --argjson size "$rsize" --arg size_human "$(human_size "$rsize")" \
     --argjson mtime "$rmt" --arg mtime_str "$rmstr" --argjson file_count "$rfc" \
@@ -323,32 +395,63 @@ for wkey in "${AGG_ORDER[@]}"; do
       rep_pod:$rep_pod, rep_container:$rep_container, sources:$sources,
       scan_time:$scan_time, link:$link}')
 
+  # 同一工作负载只保留最新一条页面记录
   if [ -s "$META_FILE" ]; then
     tmp="$META_FILE.tmp.$$"
     if jq --arg date "$TODAY" --arg now "$SCAN_TIME" --arg cluster "$CLUSTER_NAME" \
         --argjson rec "$rec" '
         (if .date == $date then . else {date:$date, alerts:[]} end)
         | .date = $date | .updated_at = $now | .cluster = $cluster
-        | .alerts = ([$rec] + (.alerts // []))
+        | .alerts = ([$rec] + ((.alerts // []) | map(select(.id != $rec.id))))
       ' "$META_FILE" > "$tmp" 2>/dev/null; then
       mv "$tmp" "$META_FILE"
     else
       rm -f "$tmp"
-      log "更新页面数据失败：$id"
+      log "更新页面数据失败：$rid"
     fi
   fi
 
-  attempts=$(( attempts + 1 ))
-  if [ "$attempts" -gt "$MAX_MESSAGES" ]; then
-    skipped_by_limit=$(( skipped_by_limit + 1 ))
-    continue
+  # ---- 状态机判定 ----
+  prev="$(state_get "$wkey")"
+  p_alerted=false; p_lts=0; p_lmt=0; p_lmstr=""
+  if [ -n "$prev" ]; then
+    IFS=$'\t' read -r p_alerted p_lts p_lmt p_lmstr _p_id _p_ns _p_wl _p_file _p_hits <<< "$prev"
+    [ -z "$p_alerted" ] && p_alerted=false
+    [ -z "$p_lts" ] && p_lts=0
+    [ -z "$p_lmt" ] && p_lmt=0
   fi
+
+  changed=1
+  if [ "$p_lmt" -ge "$rmt" ] 2>/dev/null; then changed=0; fi
+
+  kind=""
+  if [ "$p_alerted" != "true" ]; then
+    kind="new"
+  elif [ "$changed" = "1" ] && [ $(( NOW - p_lts )) -ge $(( RENOTIFY_HOURS * 3600 )) ]; then
+    kind="repeat"
+  fi
+
+  lmt="$rmt"; lmstr="$rmstr"
+  if [ "$p_lmt" -gt "$lmt" ] 2>/dev/null; then lmt="$p_lmt"; lmstr="${p_lmstr:-$p_lmt}"; fi
 
   # 展示用 Pod 名字过长时截断
   pod_show="$pods"
   if [ "$(printf '%s' "$pod_show" | wc -c)" -gt 200 ]; then pod_show="$(printf '%s' "$pod_show" | cut -c1-200)…"; fi
 
-  msg="**错误日志告警**
+  if [ -n "$kind" ]; then
+    if [ "$SEND_ALLOWED" != "true" ]; then
+      log "非告警时段，仅写入页面：${wns}/${wl} ${rfname}"
+    elif [ "$sent" -ge "$MAX_MESSAGES" ]; then
+      skipped_by_limit=$(( skipped_by_limit + 1 ))
+    else
+      if [ "$kind" = "repeat" ]; then
+        title="**错误日志持续告警**"
+        policy="> 提醒策略：同一工作负载每 ${RENOTIFY_HOURS} 小时最多提醒一次"
+      else
+        title="**错误日志告警**"
+        policy=""
+      fi
+      msg="${title}
 > 集群：${CLUSTER_NAME}
 > 命名空间：${wns}
 > 工作负载：${wl}
@@ -357,19 +460,73 @@ for wkey in "${AGG_ORDER[@]}"; do
 > Pod 列表：${pod_show}
 > 代表日志：${rfname}（$(human_size "$rsize")，最后写入 ${rmstr}）
 > 摘要：ERROR ${total_err} 行 / Exception ${total_exc} 处（${src_count} 份副本日志）
-> 扫描时间：${SCAN_TIME}（检测窗口 ${CHECK_INTERVAL_HOURS} 小时）"
-  if [ -n "$link" ]; then
-    msg="${msg}
+> 扫描时间：${SCAN_TIME}（近 ${RECENT_WINDOW_MINUTES} 分钟有写入）"
+      [ -n "$policy" ] && msg="${msg}
+${policy}"
+      if [ -n "$link" ]; then
+        msg="${msg}
 > [查看日志详情](${link})"
+      fi
+      if send_wecom "$msg"; then
+        sent=$(( sent + 1 ))
+        p_alerted=true
+        log "已告警（${kind}）：${wns}/${wl}（${hits} 个 Pod/容器）${rfname}"
+      else
+        log "发送失败：${wns}/${wl} ${rfname}"
+      fi
+      p_lts=$NOW
+    fi
+  fi
+
+  state_set "$wkey" "$wns" "$wl" "$p_alerted" "$p_lts" "$lmt" "$lmstr" "$rid" "$rfname" "$hits"
+done
+
+# ---- 恢复检测：本次没有新增错误的工作负载 ----
+mapfile -t STATE_KEYS < <(jq -r '(.workloads // {}) | keys[]' "$STATE_FILE" 2>/dev/null)
+for k in "${STATE_KEYS[@]}"; do
+  [ -z "$k" ] && continue
+  [ -n "${AGG_SEEN[$k]:-}" ] && continue
+
+  prev="$(state_get "$k")"
+  [ -z "$prev" ] && continue
+  IFS=$'\t' read -r p_alerted p_lts p_lmt p_lmstr p_id p_ns p_wl p_file p_hits <<< "$prev"
+  [ -z "$p_alerted" ] && p_alerted=false
+  [ -z "$p_lmt" ] && p_lmt=0
+  [ -z "$p_lmstr" ] && p_lmstr="$p_lmt"
+
+  # 从未告警过的记录：静默清理，不发恢复
+  if [ "$p_alerted" != "true" ]; then
+    drop_record "$p_id"
+    state_remove "$k"
+    continue
+  fi
+
+  if [ $(( NOW - p_lmt )) -lt $(( RECOVERY_MINUTES * 60 )) ]; then
+    continue
   fi
 
   if [ "$SEND_ALLOWED" != "true" ]; then
-    log "非告警时间点，仅写入页面：${wns}/${wl} ${rfname}"
-  elif send_wecom "$msg"; then
-    sent=$(( sent + 1 ))
-    log "已告警：${wns}/${wl}（${hits} 个 Pod/容器）${rfname}"
+    log "非告警时段，恢复通知顺延：${p_ns}/${p_wl}（最后错误 ${p_lmstr}）"
+    continue
+  fi
+
+  msg="**错误日志恢复**
+> 集群：${CLUSTER_NAME}
+> 命名空间：${p_ns}
+> 工作负载：${p_wl}
+> 最后错误写入：${p_lmstr}
+> 状态：已连续 ${RECOVERY_MINUTES} 分钟无新增错误"
+  if [ -n "$WEB_BASE_URL" ]; then
+    msg="${msg}
+> [查看日志监控页面](${WEB_BASE_URL})"
+  fi
+
+  if send_wecom "$msg"; then
+    log "已发送恢复：${p_ns}/${p_wl}（最后错误 ${p_lmstr}）"
+    drop_record "$p_id"
+    state_remove "$k"
   else
-    log "发送失败：${wns}/${wl} ${rfname}"
+    log "恢复通知发送失败，下个巡检周期重试：${p_ns}/${p_wl}"
   fi
 done
 
@@ -382,6 +539,18 @@ if [ "$skipped_by_limit" -gt 0 ] && [ "$DRY_RUN" != "true" ] && [ "$SEND_ALLOWED
   [ -n "$WEB_BASE_URL" ] && summary="${summary}
 > [查看日志详情](${WEB_BASE_URL})"
   send_wecom "$summary" || true
+fi
+
+# 清理不再被页面记录引用的快照，避免长期运行后占用过多内存
+if [ -s "$META_FILE" ]; then
+  mapfile -t KEEP_SNAPS < <(jq -r '(.alerts // [])[] | (.sources // [])[]? | .snapshot // empty' "$META_FILE" 2>/dev/null)
+  for f in "$DATA_DIR"/logs/*.json; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f" .json)"
+    keep=0
+    for s in "${KEEP_SNAPS[@]}"; do [ "$s" = "$base" ] && keep=1 && break; done
+    [ "$keep" = "0" ] && rm -f "$f"
+  done
 fi
 
 # 无告警时也刷新页面的最后扫描时间

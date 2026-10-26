@@ -1,5 +1,5 @@
 #!/bin/bash
-# 监控常驻进程：内置静态页面服务，并在 09/11/13/15/17 点（Asia/Shanghai）执行扫描。
+# 监控常驻进程：内置静态页面服务，并按固定间隔巡检（默认 60 秒，仅 ACTIVE_HOURS 时段内执行）。
 set -uo pipefail
 
 CONFIG_FILE="${CONFIG_FILE:-/config/monitor.env}"
@@ -9,7 +9,8 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 : "${DATA_DIR:=/www/data}"
-: "${ALERT_HOURS:=9,11,13,15,17}"
+: "${SCAN_INTERVAL_SECONDS:=60}"
+: "${ACTIVE_HOURS:=9-17}"
 
 log() { echo "[$(date '+%F %T')] $*"; }
 
@@ -24,33 +25,26 @@ mkdir -p "$DATA_DIR/logs" 2>/dev/null || true
   done
 ) &
 
-IFS=',' read -r -a HOURS <<< "$ALERT_HOURS"
+# ACTIVE_HOURS=9-17 表示 09:00-17:59（含两端的小时）
+in_hours() {
+  local h s e
+  h=$((10#$(date +%H)))
+  s=${ACTIVE_HOURS%%-*}
+  e=${ACTIVE_HOURS##*-}
+  [ "$h" -ge "$((10#$s))" ] && [ "$h" -le "$((10#$e))" ]
+}
 
-log "启动，先执行一次扫描"
+log "启动，先执行一次扫描（巡检间隔 ${SCAN_INTERVAL_SECONDS} 秒，时段 ${ACTIVE_HOURS}）"
 /bin/bash /scripts/monitor.sh
 
 while true; do
-  hh=$((10#$(date +%H)))
-  mm=$((10#$(date +%M)))
-  ss=$((10#$(date +%S)))
-  sod=$(( hh * 3600 + mm * 60 + ss ))
+  now=$(date +%s)
+  next=$(( (now / SCAN_INTERVAL_SECONDS + 1) * SCAN_INTERVAL_SECONDS ))
+  sleep_s=$(( next - now ))
+  [ "$sleep_s" -lt 1 ] && sleep_s=1
+  sleep "$sleep_s"
 
-  wait_s=""
-  for h in "${HOURS[@]}"; do
-    t=$(( 10#$h * 3600 ))
-    if [ "$t" -gt "$sod" ]; then wait_s=$(( t - sod )); break; fi
-  done
-  if [ -z "$wait_s" ]; then
-    wait_s=$(( 86400 - sod + 10#${HOURS[0]} * 3600 ))
+  if in_hours; then
+    /bin/bash /scripts/monitor.sh
   fi
-
-  log "下次扫描 ${wait_s} 秒后"
-  while [ "$wait_s" -gt 0 ]; do
-    if [ "$wait_s" -gt 60 ]; then s=60; else s=$wait_s; fi
-    sleep "$s"
-    wait_s=$(( wait_s - s ))
-  done
-
-  log "到达扫描时间点"
-  /bin/bash /scripts/monitor.sh
 done
