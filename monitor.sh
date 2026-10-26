@@ -434,10 +434,6 @@ for wkey in "${AGG_ORDER[@]}"; do
   lmt="$rmt"; lmstr="$rmstr"
   if [ "$p_lmt" -gt "$lmt" ] 2>/dev/null; then lmt="$p_lmt"; lmstr="${p_lmstr:-$p_lmt}"; fi
 
-  # 展示用 Pod 名字过长时截断
-  pod_show="$pods"
-  if [ "$(printf '%s' "$pod_show" | wc -c)" -gt 200 ]; then pod_show="$(printf '%s' "$pod_show" | cut -c1-200)…"; fi
-
   if [ -n "$kind" ]; then
     if [ "$SEND_ALLOWED" != "true" ]; then
       log "非告警时段，仅写入页面：${wns}/${wl} ${rfname}"
@@ -446,23 +442,16 @@ for wkey in "${AGG_ORDER[@]}"; do
     else
       if [ "$kind" = "repeat" ]; then
         title="**错误日志持续告警**"
-        policy="> 提醒策略：同一工作负载每 ${RENOTIFY_HOURS} 小时最多提醒一次"
       else
         title="**错误日志告警**"
-        policy=""
       fi
       msg="${title}
 > 集群：${CLUSTER_NAME}
 > 命名空间：${wns}
 > 工作负载：${wl}
 > 受影响：${hits} 个 Pod/容器；容器：${ctrs}
-> 代表 Pod：${rpod}（容器 ${rctr}）
-> Pod 列表：${pod_show}
-> 代表日志：${rfname}（$(human_size "$rsize")，最后写入 ${rmstr}）
-> 摘要：ERROR ${total_err} 行 / Exception ${total_exc} 处（${src_count} 份副本日志）
-> 扫描时间：${SCAN_TIME}（近 ${RECENT_WINDOW_MINUTES} 分钟有写入）"
-      [ -n "$policy" ] && msg="${msg}
-${policy}"
+> 摘要：ERROR ${total_err} 行 / Exception ${total_exc} 处
+> 扫描时间：${SCAN_TIME}"
       if [ -n "$link" ]; then
         msg="${msg}
 > [查看日志详情](${link})"
