@@ -6,7 +6,7 @@
     date: '',
     updatedAt: '',
     alerts: [],
-    filters: { ns: '', wl: '', pod: '', kw: '' },
+    filters: { ns: '', wl: '', kw: '' },
     selectedId: '',
     selectedSource: '',
     viewLines: 200,
@@ -22,7 +22,6 @@
     refreshBtn: document.getElementById('refreshBtn'),
     fNs: document.getElementById('fNs'),
     fWl: document.getElementById('fWl'),
-    fPod: document.getElementById('fPod'),
     fKw: document.getElementById('fKw'),
     alertCount: document.getElementById('alertCount'),
     alertList: document.getElementById('alertList'),
@@ -113,13 +112,9 @@
 
   function visibleAlerts() {
     var wl = state.filters.wl.trim().toLowerCase();
-    var pod = state.filters.pod.trim().toLowerCase();
     return state.alerts.filter(function (a) {
       if (state.filters.ns && a.namespace !== state.filters.ns) return false;
       if (wl && String(a.workload || '').toLowerCase().indexOf(wl) === -1) return false;
-      if (pod && !(a.pods || []).some(function (p) {
-        return String(p).toLowerCase().indexOf(pod) !== -1;
-      })) return false;
       return true;
     });
   }
@@ -246,7 +241,6 @@
 
     var sourceOptions = sources.map(function (s) {
       var label = (s.pod || '') + (s.container ? ' · ' + s.container : '');
-      if (s.pod === a.rep_pod && s.container === a.rep_container) label += '（代表）';
       return '<option value="' + esc(s.snapshot) + '"' + (s.snapshot === state.selectedSource ? ' selected' : '') + '>' +
         esc(label) + '</option>';
     }).join('');
@@ -405,11 +399,6 @@
 
   el.fWl.addEventListener('input', function () {
     state.filters.wl = el.fWl.value;
-    renderList();
-  });
-
-  el.fPod.addEventListener('input', function () {
-    state.filters.pod = el.fPod.value;
     renderList();
   });
 

@@ -22,7 +22,7 @@ spec:
         - name: acr
       containers:
         - name: log-monitor
-          image: registry.cn-hangzhou.aliyuncs.com/kafree/log-monitor:1.2.0
+          image: registry.cn-hangzhou.aliyuncs.com/kafree/log-monitor:1.2.2
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "/scripts/scheduler.sh"]
           ports:

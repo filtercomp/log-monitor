@@ -19,7 +19,7 @@ sed -i 's/\r$//' monitor.sh scheduler.sh deploy/*.yaml deploy/envs/*/gateway.yam
 # shellcheck disable=SC1090
 . "$ENV_DIR/monitor.env"
 
-: "${IMAGE:=registry.cn-hangzhou.aliyuncs.com/kafree/log-monitor:1.2.0}"
+: "${IMAGE:=registry.cn-hangzhou.aliyuncs.com/kafree/log-monitor:1.2.2}"
 if [ -z "${IMAGE_PULL_SECRET+x}" ]; then IMAGE_PULL_SECRET="acr"; fi
 
 echo "当前 kubectl context: $(kubectl config current-context)"
@@ -43,11 +43,14 @@ kubectl -n log-monitor create configmap log-monitor-config \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # 允许环境目录覆盖 webhook；默认使用 deploy/03-secret.yaml
-if [ -f "$ENV_DIR/secret.yaml" ]; then
-  kubectl apply -f "$ENV_DIR/secret.yaml"
-else
-  kubectl apply -f deploy/03-secret.yaml
+SECRET_FILE="$ENV_DIR/secret.yaml"
+[ -f "$SECRET_FILE" ] || SECRET_FILE="deploy/03-secret.yaml"
+if grep -q 'REPLACE_ME' "$SECRET_FILE"; then
+  echo "错误：$SECRET_FILE 中的企业微信 webhook 仍是占位值 REPLACE_ME"
+  echo "请先复制 deploy/03-secret.yaml 到 $ENV_DIR/secret.yaml 并填入真实 key，再重新执行"
+  exit 1
 fi
+kubectl apply -f "$SECRET_FILE"
 
 kubectl -n log-monitor create configmap log-monitor-script \
   --from-file=monitor.sh --from-file=scheduler.sh \
@@ -55,7 +58,7 @@ kubectl -n log-monitor create configmap log-monitor-script \
 
 # 用环境配置的镜像替换默认镜像；没有拉取凭据时移除 imagePullSecrets
 DEPLOY_FILE=$(mktemp)
-sed "s|registry.cn-hangzhou.aliyuncs.com/kafree/log-monitor:1.2.0|$IMAGE|g" deploy/04-deployment.yaml > "$DEPLOY_FILE"
+sed "s|registry.cn-hangzhou.aliyuncs.com/kafree/log-monitor:1.2.2|$IMAGE|g" deploy/04-deployment.yaml > "$DEPLOY_FILE"
 if [ -n "$IMAGE_PULL_SECRET" ]; then
   sed -i "s|name: acr|name: $IMAGE_PULL_SECRET|" "$DEPLOY_FILE"
 else

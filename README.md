@@ -10,7 +10,7 @@ Kubernetes 集群内的轻量错误日志监控与告警工具，不需要部署
 - **按工作负载聚合**：同一 Deployment 的多个副本合并为一条告警，避免重复消息
 - **保留每个副本**：每个 Pod/容器 各存一份日志快照，页面可切换副本查看
 - **告警精简**：只发集群、命名空间、工作负载、副本数和页面链接，不内嵌日志正文
-- **内置页面**：告警列表、命名空间/工作负载/Pod 筛选、关键字高亮、只看匹配行、100/200/1000/2000 行切换
+- **内置页面**：告警列表、命名空间/工作负载筛选、关键字高亮、只看匹配行、100/200/1000/2000 行切换
 - **多环境部署**：CN 使用 ALB Ingress，海外环境使用 APISIX（ApisixRoute + ApisixUpstream）
 
 ## 工作原理
@@ -66,8 +66,8 @@ scheduler.sh (PID 1)
 ### 1. 构建并推送镜像
 
 ```bash
-docker build -t <your-registry>/log-monitor:1.2.0 -f docker/Dockerfile .
-docker push <your-registry>/log-monitor:1.2.0
+docker build -t <your-registry>/log-monitor:1.2.2 -f docker/Dockerfile .
+docker push <your-registry>/log-monitor:1.2.2
 ```
 
 ### 2. 修改环境配置
