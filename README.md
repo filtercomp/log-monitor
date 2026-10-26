@@ -2,7 +2,7 @@
 
 Kubernetes 集群内的轻量错误日志监控与告警工具，不需要部署 Loki / ELK / 日志采集 Agent。
 
-它在集群内以单个 Deployment 常驻，按固定间隔（默认 60 秒）通过 `kubectl exec` 读取业务 Pod 的 `/tmp/logs/error/*.log`，按工作负载聚合后推送企业微信摘要，同时把每个副本的最新日志快照写入内置 Web 页面供查看。
+它在集群内以单个 Deployment 常驻，按固定间隔（默认 300 秒）通过 `kubectl exec` 读取业务 Pod 的 `/tmp/logs/error/*.log`，按工作负载聚合后推送企业微信摘要，同时把每个副本的最新日志快照写入内置 Web 页面供查看。
 
 ## 功能
 
@@ -27,9 +27,9 @@ scheduler.sh (PID 1)
     └── 读取 /www/data/state.json 状态机，决定首次告警 / 重复提醒 / 恢复通知
 ```
 
-- 默认巡检间隔：`60` 秒
+- 默认巡检间隔：`300` 秒
 - 默认运行时段：`09:00-17:59`（Asia/Shanghai），时段外只刷新页面不发消息
-- 检测窗口：最近 `RECENT_WINDOW_MINUTES`（默认 5）分钟内有写入的日志文件
+- 检测窗口：最近 `RECENT_WINDOW_MINUTES`（默认 6）分钟内有写入的日志文件
 - 重复提醒：同一工作负载持续有新错误时，每 `RENOTIFY_HOURS`（默认 2）小时最多一次
 - 恢复判定：连续 `RECOVERY_MINUTES`（默认 20）分钟无新增错误，发送一次恢复通知并清除页面记录
 - 恢复后再次报错会立即重新告警
@@ -123,9 +123,9 @@ kubectl config current-context   # 先确认集群没连错
 | --- | --- | --- |
 | `CLUSTER_NAME` | `cn-prod` | 集群名称 |
 | `ERROR_LOG_DIR` | `/tmp/logs/error` | 容器内错误日志目录 |
-| `SCAN_INTERVAL_SECONDS` | `60` | 巡检间隔（秒） |
+| `SCAN_INTERVAL_SECONDS` | `300` | 巡检间隔（秒） |
 | `ACTIVE_HOURS` | `9-17` | 运行时段，含两端小时（09:00-17:59）；时段外只更新页面不发消息 |
-| `RECENT_WINDOW_MINUTES` | `5` | 每次巡检回看窗口（分钟） |
+| `RECENT_WINDOW_MINUTES` | `6` | 每次巡检回看窗口（分钟） |
 | `RECOVERY_MINUTES` | `20` | 连续多少分钟无新增错误判定为恢复 |
 | `RENOTIFY_HOURS` | `2` | 持续报错时的重复提醒间隔（小时） |
 | `SNAPSHOT_LINES` | `2000` | 每个副本保留的最新日志行数 |

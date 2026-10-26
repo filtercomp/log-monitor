@@ -1,5 +1,5 @@
 #!/bin/bash
-# 监控常驻进程：内置静态页面服务，并按固定间隔巡检（默认 60 秒，仅 ACTIVE_HOURS 时段内执行）。
+# 监控常驻进程：内置静态页面服务，并按固定间隔巡检（默认 300 秒，仅 ACTIVE_HOURS 时段内执行）。
 set -uo pipefail
 
 CONFIG_FILE="${CONFIG_FILE:-/config/monitor.env}"
@@ -9,7 +9,7 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 : "${DATA_DIR:=/www/data}"
-: "${SCAN_INTERVAL_SECONDS:=60}"
+: "${SCAN_INTERVAL_SECONDS:=300}"
 : "${ACTIVE_HOURS:=9-17}"
 
 log() { echo "[$(date '+%F %T')] $*"; }
