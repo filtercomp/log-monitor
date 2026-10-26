@@ -10,7 +10,7 @@ Kubernetes 集群内的轻量错误日志监控与告警工具，不需要部署
 - **按工作负载聚合**：同一 Deployment 的多个副本合并为一条告警，避免重复消息
 - **告警降噪**：首次发现立即告警，持续报错每 2 小时最多提醒一次，20 分钟无新增错误发送恢复通知
 - **保留每个副本**：每个 Pod/容器 各存一份日志快照，页面可切换副本查看
-- **告警精简**：只发集群、命名空间、工作负载、副本数和页面链接，不内嵌日志正文
+- **告警精简**：只发集群、命名空间、工作负载、受影响副本数、ERROR/Exception 统计和页面链接，不内嵌日志正文
 - **内置页面**：告警列表、命名空间/工作负载筛选、关键字高亮、只看匹配行、100/200/1000/2000 行切换
 - **多环境部署**：CN 使用 ALB Ingress，海外环境使用 APISIX（ApisixRoute + ApisixUpstream）
 
@@ -33,6 +33,7 @@ scheduler.sh (PID 1)
 - 重复提醒：同一工作负载持续有新错误时，每 `RENOTIFY_HOURS`（默认 2）小时最多一次
 - 恢复判定：连续 `RECOVERY_MINUTES`（默认 20）分钟无新增错误，发送一次恢复通知并清除页面记录
 - 恢复后再次报错会立即重新告警
+- 时段外不发送任何消息；此时若已满足恢复条件，恢复通知会顺延到下一个时段内的巡检再发
 - 数据只保留当天，跨天自动清空
 - 状态与快照存放在内存 `emptyDir` 中，Pod 重建后丢失（可能重复告警一次）
 
@@ -42,7 +43,7 @@ scheduler.sh (PID 1)
 .
 ├── monitor.sh                # 扫描、聚合、生成快照、发送告警
 ├── scheduler.sh              # 常驻进程：lighttpd + 定时调度
-├── deploy.sh                 # 按环境部署：./deploy.sh [cn|ru|eu|usw]
+├── deploy.sh                 # 按环境部署：./deploy.sh [cn|ru|eu|usw]，并动态生成两个 ConfigMap
 ├── deploy/
 │   ├── 00-namespace.yaml
 │   ├── 01-rbac.yaml          # 集群级 RBAC（namespaces/pods/exec/replicasets）
@@ -115,6 +116,27 @@ kubectl config current-context   # 先确认集群没连错
 ./deploy.sh ru
 ```
 
+## 更新配置或脚本
+
+`monitor.env` 和两个脚本都**不在镜像里**。`deploy.sh` 在部署时用 `kubectl create configmap --from-file` 动态生成两个 ConfigMap：
+
+| ConfigMap | 来源 | 挂载位置 |
+| --- | --- | --- |
+| `log-monitor-config` | `deploy/envs/<env>/monitor.env` | `/config/monitor.env` |
+| `log-monitor-script` | `monitor.sh`、`scheduler.sh` | `/scripts` |
+
+因此仓库的 `deploy/` 下没有这两个 ConfigMap 的 YAML 文件，它们只在部署时生成。
+
+修改配置或脚本后，重新执行对应环境的部署即可，**不需要重建镜像，也不需要重启 Pod**：
+
+```bash
+./deploy.sh cn
+```
+
+两个 volume 都未使用 `subPath`，kubelet 会在约 1 分钟内把新内容同步进 Pod 内的文件；`scheduler.sh` 下一轮巡检会重新调用 `/scripts/monitor.sh`，直接使用新脚本。状态（`state.json`）保留，不会因此重复告警。
+
+只有修改 `web/` 页面或 `docker/` 下的 Dockerfile、lighttpd 配置时才需要重新构建镜像，并同步提升版本号（`imagePullPolicy: IfNotPresent`，版本不变会继续使用节点上的旧镜像）。
+
 ## 配置项
 
 `monitor.env` 中的监控参数：
@@ -163,13 +185,12 @@ spec:
 > 命名空间：kafree-swarm
 > 工作负载：Deployment/payment-service
 > 受影响：2 个 Pod/容器；容器：payment-service
-> 代表 Pod：payment-service-7d9f-abcde（容器 payment-service）
-> 摘要：ERROR 3 行 / Exception 1 处（2 份副本日志）
-> 扫描时间：2026-10-26 11:00:00（近 5 分钟有写入）
+> 摘要：ERROR 3 行 / Exception 1 处
+> 扫描时间：2026-10-26 11:00:00
 > [查看日志详情](https://.../#/alert/w-1234567890)
 ```
 
-持续报错时每 2 小时最多再提醒一次（标题为 `错误日志持续告警`）；连续 20 分钟无新增错误后发送一次 `错误日志恢复`。
+持续报错时每 2 小时最多再提醒一次，标题为 `错误日志持续告警`，正文与首次告警一致；连续 20 分钟无新增错误后发送一次 `错误日志恢复`。
 
 ## 使用限制
 
@@ -178,6 +199,7 @@ spec:
 - 页面默认**没有认证**，请只在内网/受信网络暴露，或在网关层自行加鉴权
 - 日志快照存放在内存（`emptyDir`，默认上限 256Mi），只保留当天
 - Pod 重建后，重建前的快照不可恢复
+- 页面每 60 秒自动刷新告警列表；日志正文在点开某条告警时才读取。页面上的「刷新」按钮只是重新读取 `alerts.json`，不会触发扫描
 - 时区固定为 `Asia/Shanghai`
 
 ## License
