@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-monitor
+  namespace: log-monitor
+  labels:
+    app.kubernetes.io/name: log-monitor
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: log-monitor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: log-monitor
+    spec:
+      serviceAccountName: log-monitor
+      imagePullSecrets:
+        - name: acr
+      containers:
+        - name: log-monitor
+          image: registry.cn-hangzhou.aliyuncs.com/kafree/log-monitor:1.2.0
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/scripts/scheduler.sh"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+            - name: CONFIG_FILE
+              value: /config/monitor.env
+            - name: WECOM_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: log-monitor-webhook
+                  key: webhook-url
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            # 页面数据（当天告警与日志快照），随 Pod 生命周期存续
+            - name: data
+              mountPath: /www/data
+      volumes:
+        - name: config
+          configMap:
+            name: log-monitor-config
+        - name: scripts
+          configMap:
+            name: log-monitor-script
+            defaultMode: 0755
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi

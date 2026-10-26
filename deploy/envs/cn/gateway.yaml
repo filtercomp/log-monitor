@@ -1,0 +1,23 @@
+# CN：ACK ALB Ingress（共享 ALB，证书由 AlbConfig 管理）
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: log-monitor
+  namespace: log-monitor
+  labels:
+    app.kubernetes.io/name: log-monitor
+  annotations:
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
+spec:
+  ingressClassName: alb-config
+  rules:
+    - host: kafree-cn-log-monitor.coffee-iot.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: log-monitor
+                port:
+                  number: 80

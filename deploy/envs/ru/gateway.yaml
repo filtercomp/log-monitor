@@ -1,0 +1,35 @@
+# RU：APISIX 入口
+# 前置：集群已有 ingressClassName=apisix，且存在覆盖 *.coffee-iot.com 的 ApisixTls
+apiVersion: apisix.apache.org/v2
+kind: ApisixUpstream
+metadata:
+  name: log-monitor
+  namespace: log-monitor
+spec:
+  ingressClassName: apisix
+  loadbalancer:
+    type: roundrobin
+  scheme: http
+  timeout:
+    connect: 5s
+    read: 60s
+    send: 60s
+---
+apiVersion: apisix.apache.org/v2
+kind: ApisixRoute
+metadata:
+  name: log-monitor
+  namespace: log-monitor
+spec:
+  ingressClassName: apisix
+  http:
+    - name: log-monitor-web
+      match:
+        hosts:
+          - "kafree-ru-log-monitor.coffee-iot.com"
+        paths:
+          - /*
+          - /
+      backends:
+        - serviceName: log-monitor
+          servicePort: 80

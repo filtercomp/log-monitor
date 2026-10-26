@@ -1,0 +1,7 @@
+# 私有环境配置（企微 webhook 等），不提交
+deploy/envs/*/secret.yaml
+
+# 本地临时文件
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>错误日志监控</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <div class="brand-text">
+        <h1>错误日志监控</h1>
+        <p class="sub"><span id="clusterName">cn-prod</span> · 工作负载聚合 · 仅保留当天记录</p>
+      </div>
+    </div>
+    <div class="status">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">加载中…</span>
+      <button class="btn" id="refreshBtn" type="button">刷新</button>
+    </div>
+  </header>
+
+  <section class="filters">
+    <label class="field">
+      <span>命名空间</span>
+      <select id="fNs"><option value="">全部</option></select>
+    </label>
+    <label class="field">
+      <span>工作负载</span>
+      <input id="fWl" type="search" placeholder="按工作负载名称筛选" autocomplete="off">
+    </label>
+    <label class="field">
+      <span>Pod</span>
+      <input id="fPod" type="search" placeholder="按 Pod 名称筛选" autocomplete="off">
+    </label>
+    <label class="field">
+      <span>日志关键字</span>
+      <input id="fKw" type="search" placeholder="在日志中高亮 / 只看匹配行" autocomplete="off">
+    </label>
+  </section>
+
+  <main class="layout">
+    <aside class="pane list-pane">
+      <div class="pane-head">
+        <span>今日告警</span>
+        <span class="count" id="alertCount">0</span>
+      </div>
+      <div class="list" id="alertList">
+        <div class="empty">正在加载…</div>
+      </div>
+    </aside>
+
+    <section class="pane detail-pane" id="detail">
+      <div class="empty">从左侧选择一条告警查看详情</div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
