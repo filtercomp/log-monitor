@@ -441,9 +441,9 @@ for wkey in "${AGG_ORDER[@]}"; do
       skipped_by_limit=$(( skipped_by_limit + 1 ))
     else
       if [ "$kind" = "repeat" ]; then
-        title="**错误日志持续告警**"
+        title="**🔥 <font color=\"warning\">错误日志持续告警</font>**"
       else
-        title="**错误日志告警**"
+        title="**🔥 <font color=\"warning\">错误日志告警</font>**"
       fi
       msg="${title}
 > 集群：${CLUSTER_NAME}
@@ -499,7 +499,7 @@ for k in "${STATE_KEYS[@]}"; do
     continue
   fi
 
-  msg="**错误日志恢复**
+  msg="**💚 <font color=\"info\">错误日志恢复</font>**
 > 集群：${CLUSTER_NAME}
 > 命名空间：${p_ns}
 > 工作负载：${p_wl}
@@ -521,7 +521,7 @@ done
 
 # 超出单次发送上限时补一条汇总
 if [ "$skipped_by_limit" -gt 0 ] && [ "$DRY_RUN" != "true" ] && [ "$SEND_ALLOWED" = "true" ]; then
-  summary="**错误日志告警（汇总）**
+  summary="**🔥 <font color=\"warning\">错误日志告警（汇总）</font>**
 > 集群：${CLUSTER_NAME}
 > 本次共发现 ${found_total} 个工作负载有新增错误日志，已发送 ${sent} 条，因单次上限 ${MAX_MESSAGES} 条未发送 ${skipped_by_limit} 条
 > 扫描时间：${SCAN_TIME}"
