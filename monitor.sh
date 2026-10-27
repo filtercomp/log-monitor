@@ -4,9 +4,9 @@
 #
 # 告警降噪：
 #   1. 首次发现错误立即告警；
-#   2. 持续有新增错误时，同一工作负载每 RENOTIFY_HOURS 小时最多提醒一次；
+#   2. 同一工作负载每 RENOTIFY_HOURS 小时最多发送一条告警（无论首次还是持续）；
 #   3. 连续 RECOVERY_MINUTES 分钟无新增错误后发送一次恢复通知，并清除页面记录；
-#   4. 恢复后再次报错按首次发现处理，立即告警。
+#   4. 恢复不清除上次告警时间，冷却期内再次报错只更新页面、不发消息。
 set -uo pipefail
 
 CONFIG_FILE="${CONFIG_FILE:-/config/monitor.env}"
@@ -424,10 +424,14 @@ for wkey in "${AGG_ORDER[@]}"; do
   changed=1
   if [ "$p_lmt" -ge "$rmt" ] 2>/dev/null; then changed=0; fi
 
+  # 同一工作负载在冷却期内（距上次告警不足 RENOTIFY_HOURS 小时）不再发消息
+  cooldown_ok=0
+  if [ $(( NOW - p_lts )) -ge $(( RENOTIFY_HOURS * 3600 )) ]; then cooldown_ok=1; fi
+
   kind=""
   if [ "$p_alerted" != "true" ]; then
-    kind="new"
-  elif [ "$changed" = "1" ] && [ $(( NOW - p_lts )) -ge $(( RENOTIFY_HOURS * 3600 )) ]; then
+    [ "$cooldown_ok" = "1" ] && kind="new"
+  elif [ "$changed" = "1" ] && [ "$cooldown_ok" = "1" ]; then
     kind="repeat"
   fi
 
@@ -483,10 +487,12 @@ for k in "${STATE_KEYS[@]}"; do
   [ -z "$p_lmt" ] && p_lmt=0
   [ -z "$p_lmstr" ] && p_lmstr="$p_lmt"
 
-  # 从未告警过的记录：静默清理，不发恢复
+  # 从未告警过或已恢复：冷却期结束后清理状态，冷却期内保留上次告警时间
   if [ "$p_alerted" != "true" ]; then
-    drop_record "$p_id"
-    state_remove "$k"
+    if [ $(( NOW - p_lts )) -ge $(( RENOTIFY_HOURS * 3600 )) ]; then
+      drop_record "$p_id"
+      state_remove "$k"
+    fi
     continue
   fi
 
@@ -513,7 +519,8 @@ for k in "${STATE_KEYS[@]}"; do
   if send_wecom "$msg"; then
     log "已发送恢复：${p_ns}/${p_wl}（最后错误 ${p_lmstr}）"
     drop_record "$p_id"
-    state_remove "$k"
+    # 保留 last_alert_ts，冷却期内再次报错不重复告警
+    state_set "$k" "$p_ns" "$p_wl" false "$p_lts" "$p_lmt" "$p_lmstr" "$p_id" "$p_file" "$p_hits"
   else
     log "恢复通知发送失败，下个巡检周期重试：${p_ns}/${p_wl}"
   fi
