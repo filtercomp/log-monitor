@@ -19,7 +19,7 @@ sed -i 's/\r$//' monitor.sh scheduler.sh deploy/*.yaml deploy/envs/*/gateway.yam
 # shellcheck disable=SC1090
 . "$ENV_DIR/monitor.env"
 
-: "${IMAGE:=registry.cn-hangzhou.aliyuncs.com/kafree/log-monitor:1.3.0}"
+: "${IMAGE:=registry.cn-hangzhou.aliyuncs.com/kafree/log-monitor:1.4.0}"
 if [ -z "${IMAGE_PULL_SECRET+x}" ]; then IMAGE_PULL_SECRET="acr"; fi
 
 echo "当前 kubectl context: $(kubectl config current-context)"
@@ -58,7 +58,7 @@ kubectl -n log-monitor create configmap log-monitor-script \
 
 # 用环境配置的镜像替换默认镜像；没有拉取凭据时移除 imagePullSecrets
 DEPLOY_FILE=$(mktemp)
-sed "s|registry.cn-hangzhou.aliyuncs.com/kafree/log-monitor:1.3.0|$IMAGE|g" deploy/04-deployment.yaml > "$DEPLOY_FILE"
+sed "s|registry.cn-hangzhou.aliyuncs.com/kafree/log-monitor:1.4.0|$IMAGE|g" deploy/04-deployment.yaml > "$DEPLOY_FILE"
 if [ -n "$IMAGE_PULL_SECRET" ]; then
   sed -i "s|name: acr|name: $IMAGE_PULL_SECRET|" "$DEPLOY_FILE"
 else

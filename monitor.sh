@@ -70,17 +70,27 @@ send_wecom() {
   esac
 }
 
-# 在容器内执行的探测脚本（由远端 sh 执行，参数：日志目录 起始时间戳 行数）
+# 在容器内执行的探测脚本（由远端 sh 执行，参数：日志目录 起始时间戳 行数 当天日期）
 # 输出两部分：1) 当天全部日志的错误归类（CAT 行，tab 分隔）；2) 窗口内最新文件的快照
 read -r -d '' PROBE <<'EOS' || true
-d="$1"; since="$2"; n="$3"
+d="$1"; since="$2"; n="$3"; today="$4"
 [ -d "$d" ] || exit 3
 cd "$d" || exit 3
 echo "@@DAILY-BEGIN"
+# 只读当天写入的文件：文件名含当天日期，或无日期但今天被追加写入
+day_start=$(date -d "$today 00:00:00" +%s 2>/dev/null) || day_start=0
 flist=""
-for f in *.log; do [ -f "$f" ] && flist="$flist $f"; done
+for f in *.log; do
+  [ -f "$f" ] || continue
+  case "$f" in
+    *"$today"*) flist="$flist $f" ;;
+    *)
+      mt=$(stat -c %Y "$f" 2>/dev/null) || continue
+      [ "$mt" -ge "$day_start" ] && flist="$flist $f" ;;
+  esac
+done
 if [ -n "$flist" ]; then
-  awk '
+  awk -v today="$today" '
     function flushblk(  k) {
       if (!inblk) return
       k = (root != "") ? root : top
@@ -96,6 +106,7 @@ if [ -n "$flist" ]; then
     {
       if ($0 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/) {
         flushblk()
+        if (substr($0, 1, 10) != today) { inblk = 0; next }
         if ($0 ~ /ERROR/) {
           inblk = 1
           tsstr = substr($0, 1, 19)
@@ -299,7 +310,7 @@ for ns in "${NS_LIST[@]}"; do
       [ -z "$c" ] && continue
       if printf '%s' "$c" | grep -qE "$EXCLUDE_CONTAINERS"; then continue; fi
 
-      raw=$(timeout 40 kubectl exec -n "$ns" "$pod" -c "$c" -- sh -c "$PROBE" sh "$ERROR_LOG_DIR" "$SINCE" "$SNAPSHOT_LINES" 2>/dev/null)
+      raw=$(timeout 40 kubectl exec -n "$ns" "$pod" -c "$c" -- sh -c "$PROBE" sh "$ERROR_LOG_DIR" "$SINCE" "$SNAPSHOT_LINES" "$TODAY" 2>/dev/null)
       rc=$?
 
       # 解析返回块：先收当天归类（rc=4 时也有），再收窗口快照
