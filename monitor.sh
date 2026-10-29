@@ -71,10 +71,64 @@ send_wecom() {
 }
 
 # 在容器内执行的探测脚本（由远端 sh 执行，参数：日志目录 起始时间戳 行数）
+# 输出两部分：1) 当天全部日志的错误归类（CAT 行，tab 分隔）；2) 窗口内最新文件的快照
 read -r -d '' PROBE <<'EOS' || true
 d="$1"; since="$2"; n="$3"
 [ -d "$d" ] || exit 3
 cd "$d" || exit 3
+echo "@@DAILY-BEGIN"
+flist=""
+for f in *.log; do [ -f "$f" ] && flist="$flist $f"; done
+if [ -n "$flist" ]; then
+  awk '
+    function flushblk(  k) {
+      if (!inblk) return
+      k = (root != "") ? root : top
+      if (k == "" && match(msg, /[a-zA-Z_$][a-zA-Z0-9_$]*(\.[a-zA-Z_$][a-zA-Z0-9_$]*)*(Exception|Error|Throwable)/))
+        k = substr(msg, RSTART, RLENGTH)
+      if (k == "") k = "(no-stack)"
+      cnt[k]++
+      if (!(k in first)) first[k] = tsstr
+      last[k] = tsstr
+      if (!(k in samp)) samp[k] = msg
+      inblk = 0
+    }
+    {
+      if ($0 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/) {
+        flushblk()
+        if ($0 ~ /ERROR/) {
+          inblk = 1
+          tsstr = substr($0, 1, 19)
+          m = $0
+          sub(/^.*ERROR/, "", m)
+          sub(/^[ \t:|-]+/, "", m)
+          gsub(/\t/, " ", m)
+          msg = substr(m, 1, 160)
+          root = ""; top = ""
+        }
+        next
+      }
+      if (!inblk) next
+      if ($0 ~ /^Caused by:/) {
+        c = $0
+        sub(/^Caused by:[ \t]*/, "", c)
+        sub(/:.*/, "", c)
+        sub(/[ \t]+$/, "", c)
+        if (c != "") root = c
+      } else if (top == "" && $0 ~ /^[a-zA-Z_$][a-zA-Z0-9_$.]*(Exception|Error|Throwable)([: ]|$)/) {
+        t = $0
+        sub(/:.*$/, "", t)
+        sub(/[ \t].*$/, "", t)
+        top = t
+      }
+    }
+    END {
+      flushblk()
+      for (k in cnt) printf "CAT\t%s\t%d\t%s\t%s\t%s\n", k, cnt[k], first[k], last[k], samp[k]
+    }
+  ' $flist
+fi
+echo "@@DAILY-END"
 cnt=0; newest=""; newest_mt=0; newest_sz=0
 for f in *.log; do
   [ -f "$f" ] || continue
@@ -210,6 +264,11 @@ declare -a AGG_ORDER=()
 declare -A SRC_IDX=() SRC_WKEY=() SRC_POD=() SRC_CTR=() SRC_FILE=()
 declare -A SRC_MTIME=() SRC_MTIME_STR=() SRC_SIZE=() SRC_FCOUNT=() SRC_BODY_FILE=()
 declare -a SRC_ORDER=()
+
+# 当天错误归类聚合：键 = 工作负载|异常类
+declare -A DCNT=() DFIRST=() DLAST=() DSAMP=()
+declare -A DWL_SEEN=()
+declare -a DWL_ORDER=()
 SCAN_TMP=$(mktemp -d /tmp/log-monitor-scan.XXXXXX)
 trap 'rm -rf "$SCAN_TMP"' EXIT
 
@@ -242,14 +301,9 @@ for ns in "${NS_LIST[@]}"; do
 
       raw=$(timeout 40 kubectl exec -n "$ns" "$pod" -c "$c" -- sh -c "$PROBE" sh "$ERROR_LOG_DIR" "$SINCE" "$SNAPSHOT_LINES" 2>/dev/null)
       rc=$?
-      if [ $rc -eq 4 ]; then continue; fi          # 窗口内无变更
-      if [ $rc -ne 0 ]; then
-        log "跳过 $ns/$pod/$c（exec rc=$rc，可能无该目录或无权限）"
-        continue
-      fi
 
-      # 解析返回块（每个 Pod/容器 一个块）
-      fname=""; fsize=""; fmtime=""; fmstr=""; fcount="0"; body=""; in_body=0
+      # 解析返回块：先收当天归类（rc=4 时也有），再收窗口快照
+      fname=""; fsize=""; fmtime=""; fmstr=""; fcount="0"; body=""; in_body=0; in_daily=0
       while IFS= read -r line; do
         case "$line" in
           @@COUNT=*) fcount="${line#@@COUNT=}" ;;
@@ -257,11 +311,35 @@ for ns in "${NS_LIST[@]}"; do
           @@MTIME=*) fmtime="${line#@@MTIME=}" ;;
           @@MTIME_STR=*) fmstr="${line#@@MTIME_STR=}" ;;
           @@SIZE=*) fsize="${line#@@SIZE=}" ;;
+          @@DAILY-BEGIN) in_daily=1 ;;
+          @@DAILY-END) in_daily=2 ;;
           @@LOGS-BEGIN) in_body=1 ;;
           @@LOGS-END) in_body=2 ;;
-          *) [ "$in_body" = "1" ] && body="${body}${line}"$'\n' ;;
+          CAT$'\t'*)
+            if [ "$in_daily" = "1" ]; then
+              IFS=$'\t' read -r _tag catv cnum cfirst clast csamp <<< "$line"
+              if [ -n "$catv" ]; then
+                if [ -z "${DWL_SEEN[$wkey]:-}" ]; then DWL_SEEN["$wkey"]=1; DWL_ORDER+=("$wkey"); fi
+                dkey="$wkey|$catv"
+                if [ -z "${DCNT[$dkey]:-}" ]; then
+                  DCNT["$dkey"]=$cnum; DFIRST["$dkey"]=$cfirst; DLAST["$dkey"]=$clast; DSAMP["$dkey"]=$csamp
+                else
+                  DCNT["$dkey"]=$(( DCNT[$dkey] + cnum ))
+                  [[ "$cfirst" < "${DFIRST[$dkey]}" ]] && DFIRST["$dkey"]=$cfirst
+                  [[ "$clast" > "${DLAST[$dkey]}" ]] && DLAST["$dkey"]=$clast
+                fi
+              fi
+            fi ;;
+          *)
+            if [ "$in_body" = "1" ]; then body="${body}${line}"$'\n'; fi ;;
         esac
       done <<< "$raw"
+
+      if [ $rc -eq 4 ]; then continue; fi          # 窗口内无变更（归类已统计）
+      if [ $rc -ne 0 ]; then
+        log "跳过 $ns/$pod/$c（exec rc=$rc，可能无该目录或无权限）"
+        continue
+      fi
 
       [ -z "$fname" ] && continue
 
@@ -309,6 +387,41 @@ for ns in "${NS_LIST[@]}"; do
     done
   done
 done
+
+# ---- 当天错误归类：生成 errors-daily.json / errors-daily.csv（每轮全量重算覆盖） ----
+DAILY_JSON="$DATA_DIR/errors-daily.json"
+DAILY_CSV="$DATA_DIR/errors-daily.csv"
+groups_jsonl="$SCAN_TMP/daily-groups.jsonl"
+: > "$groups_jsonl"
+for wkey2 in "${DWL_ORDER[@]}"; do
+  tmpcats="$SCAN_TMP/daily-cats.jsonl"
+  : > "$tmpcats"
+  prefix="$wkey2|"
+  for dkey in "${!DCNT[@]}"; do
+    [ "${dkey#"$prefix"}" != "$dkey" ] || continue
+    catv="${dkey#"$prefix"}"
+    jq -n --arg exception "$catv" --argjson count "${DCNT[$dkey]}" \
+        --arg first "${DFIRST[$dkey]}" --arg last "${DLAST[$dkey]}" --arg message "${DSAMP[$dkey]}" \
+        '{exception:$exception, count:$count, first:$first, last:$last, message:$message}' >> "$tmpcats"
+  done
+  wns2="${wkey2%%|*}"; wl2="${wkey2#*|}"
+  jq -n --arg namespace "$wns2" --arg workload "$wl2" --slurpfile cats "$tmpcats" \
+      '{namespace:$namespace, workload:$workload, categories:($cats | sort_by(-.count))}' >> "$groups_jsonl"
+done
+if jq -n --arg date "$TODAY" --arg now "$SCAN_TIME" --arg cluster "$CLUSTER_NAME" --slurpfile groups "$groups_jsonl" \
+    '{date:$date, updated_at:$now, cluster:$cluster,
+      groups:($groups | sort_by(-([.categories[].count] | add // 0)))}' > "$DAILY_JSON.tmp" 2>/dev/null; then
+  mv "$DAILY_JSON.tmp" "$DAILY_JSON"
+  {
+    printf '\xEF\xBB\xBF命名空间,工作负载,根因异常,次数,首次出现,末次出现,代表消息\n'
+    jq -r '.groups[] | . as $g | .categories[] |
+      [$g.namespace, $g.workload, .exception, (.count|tostring), .first, .last, .message] | @csv' \
+      "$DAILY_JSON" 2>/dev/null
+  } > "$DAILY_CSV.tmp" && mv "$DAILY_CSV.tmp" "$DAILY_CSV" || rm -f "$DAILY_CSV.tmp"
+else
+  rm -f "$DAILY_JSON.tmp"
+  log "写入当天错误归类失败"
+fi
 
 # ---- 按工作负载逐条写入页面数据并按状态机发送告警 ----
 found_total=${#AGG_ORDER[@]}

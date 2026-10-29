@@ -6,6 +6,8 @@
     date: '',
     updatedAt: '',
     alerts: [],
+    daily: { date: '', updatedAt: '', groups: [] },
+    view: 'alerts',
     filters: { ns: '', wl: '', kw: '' },
     selectedId: '',
     selectedSource: '',
@@ -20,12 +22,19 @@
     statusDot: document.getElementById('statusDot'),
     statusText: document.getElementById('statusText'),
     refreshBtn: document.getElementById('refreshBtn'),
+    viewSeg: document.getElementById('viewSeg'),
     fNs: document.getElementById('fNs'),
     fWl: document.getElementById('fWl'),
     fKw: document.getElementById('fKw'),
     alertCount: document.getElementById('alertCount'),
     alertList: document.getElementById('alertList'),
-    detail: document.getElementById('detail')
+    detail: document.getElementById('detail'),
+    alertsLayout: document.getElementById('alertsLayout'),
+    dailyPane: document.getElementById('dailyPane'),
+    dailyCount: document.getElementById('dailyCount'),
+    dailySummary: document.getElementById('dailySummary'),
+    dailyTable: document.getElementById('dailyTable'),
+    csvBtn: document.getElementById('csvBtn')
   };
 
   function esc(value) {
@@ -71,7 +80,8 @@
           state.alerts = [];
           state.updatedAt = '';
           state.date = '';
-          renderList();
+          renderNsOptions();
+          renderView();
           setStatus('idle', '等待首次扫描');
           return;
         }
@@ -82,8 +92,8 @@
           state.updatedAt = data.updated_at || '';
           state.alerts = Array.isArray(data.alerts) ? data.alerts : [];
           el.clusterName.textContent = state.cluster;
-          renderNsOptions();
-          renderList();
+          if (state.view !== 'daily') renderNsOptions();
+          renderView();
           updateStatus();
           if (state.selectedId && !state.alerts.some(function (a) { return a.id === state.selectedId; })) {
             state.selectedId = '';
@@ -96,10 +106,39 @@
       });
   }
 
+  function loadDaily() {
+    return fetch('/data/errors-daily.json?t=' + Date.now(), { cache: 'no-store' })
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        state.daily = {
+          date: data.date || '',
+          updatedAt: data.updated_at || '',
+          groups: Array.isArray(data.groups) ? data.groups : []
+        };
+        if (state.view === 'daily') {
+          renderNsOptions();
+          renderView();
+        }
+      })
+      .catch(function () {
+        /* 归类文件缺失不影响告警列表 */
+      });
+  }
+
+  function refreshAll() {
+    return Promise.all([loadMeta(), loadDaily()]);
+  }
+
   function renderNsOptions() {
     var names = [];
     state.alerts.forEach(function (a) {
       if (a.namespace && names.indexOf(a.namespace) === -1) names.push(a.namespace);
+    });
+    state.daily.groups.forEach(function (g) {
+      if (g.namespace && names.indexOf(g.namespace) === -1) names.push(g.namespace);
     });
     names.sort();
     el.fNs.innerHTML = '<option value="">全部</option>' + names.map(function (n) {
@@ -148,6 +187,91 @@
         '<div class="arow3">' + esc(a.file) + ' · ' + esc(a.size_human) + '</div>' +
         '</button>';
     }).join('');
+  }
+
+  /* ---------------- 视图切换 ---------------- */
+
+  function renderView() {
+    var daily = state.view === 'daily';
+    el.alertsLayout.hidden = daily;
+    el.dailyPane.hidden = !daily;
+    var btns = el.viewSeg.querySelectorAll('.seg-btn');
+    for (var i = 0; i < btns.length; i++) {
+      if (btns[i].dataset.view === state.view) btns[i].classList.add('active');
+      else btns[i].classList.remove('active');
+    }
+    if (daily) renderDaily();
+    else renderList();
+  }
+
+  function dailyRows() {
+    var rows = [];
+    state.daily.groups.forEach(function (g) {
+      (g.categories || []).forEach(function (c) {
+        rows.push({
+          namespace: g.namespace || '',
+          workload: g.workload || '',
+          exception: c.exception || '',
+          count: Number(c.count) || 0,
+          first: c.first || '',
+          last: c.last || '',
+          message: c.message || ''
+        });
+      });
+    });
+    rows.sort(function (a, b) { return b.count - a.count; });
+    return rows;
+  }
+
+  function visibleDailyRows() {
+    var wl = state.filters.wl.trim().toLowerCase();
+    var kw = state.filters.kw.trim().toLowerCase();
+    return dailyRows().filter(function (r) {
+      if (state.filters.ns && r.namespace !== state.filters.ns) return false;
+      if (wl && r.workload.toLowerCase().indexOf(wl) === -1) return false;
+      if (kw && (r.exception + ' ' + r.message).toLowerCase().indexOf(kw) === -1) return false;
+      return true;
+    });
+  }
+
+  function renderDaily() {
+    var rows = visibleDailyRows();
+    var total = 0;
+    var wls = {};
+    rows.forEach(function (r) { total += r.count; wls[r.workload] = 1; });
+    var wlCount = Object.keys(wls).length;
+
+    el.csvBtn.href = '/data/errors-daily.csv?t=' + Date.now();
+    el.csvBtn.setAttribute('download', 'errors-' + (state.daily.date || localDate()) + '.csv');
+
+    var fresh = state.daily.date === localDate();
+    el.dailyCount.textContent = String(rows.length);
+    el.dailySummary.innerHTML =
+      '<span>' + (fresh
+        ? '今日共 <strong>' + rows.length + '</strong> 类错误，合计 <strong>' + total + '</strong> 次，涉及 <strong>' + wlCount + '</strong> 个工作负载'
+        : '暂无今日归类数据') + '</span>' +
+      '<span class="hint">' + (state.daily.updatedAt ? '归类于 ' + esc(state.daily.updatedAt) + ' · 每轮巡检重算' : '') + '</span>';
+
+    if (!rows.length) {
+      el.dailyTable.innerHTML = '<div class="empty">' +
+        (state.daily.groups.length ? '没有符合筛选条件的错误类别' : '今天暂无错误日志') + '</div>';
+      return;
+    }
+
+    el.dailyTable.innerHTML =
+      '<table class="tbl">' +
+      '<thead><tr><th>工作负载</th><th>根因异常</th><th class="num">次数</th>' +
+      '<th>首次出现</th><th>末次出现</th><th>代表消息</th></tr></thead>' +
+      '<tbody>' + rows.map(function (r) {
+        return '<tr>' +
+          '<td><div class="wl-cell">' + esc(r.workload) + '</div><div class="ns-cell">' + esc(r.namespace) + '</div></td>' +
+          '<td class="mono">' + esc(r.exception) + '</td>' +
+          '<td class="num"><span class="cnt">' + esc(r.count) + '</span></td>' +
+          '<td class="mono time">' + esc(hhmmss(r.first)) + '</td>' +
+          '<td class="mono time">' + esc(hhmmss(r.last)) + '</td>' +
+          '<td class="msg" title="' + esc(r.message) + '">' + esc(r.message) + '</td>' +
+          '</tr>';
+      }).join('') + '</tbody></table>';
   }
 
   /* ---------------- 详情 ---------------- */
@@ -394,12 +518,12 @@
 
   el.fNs.addEventListener('change', function () {
     state.filters.ns = el.fNs.value;
-    renderList();
+    renderView();
   });
 
   el.fWl.addEventListener('input', function () {
     state.filters.wl = el.fWl.value;
-    renderList();
+    renderView();
   });
 
   var kwTimer = null;
@@ -407,15 +531,28 @@
     state.filters.kw = el.fKw.value;
     clearTimeout(kwTimer);
     kwTimer = setTimeout(function () {
-      if (state.selectedId) renderLog();
+      if (state.view === 'daily') renderDaily();
+      else if (state.selectedId) renderLog();
     }, 120);
   });
 
+  el.viewSeg.addEventListener('click', function (e) {
+    var btn = e.target.closest('.seg-btn');
+    if (!btn || !btn.dataset.view) return;
+    var hash = btn.dataset.view === 'daily' ? '#/daily' : '#/';
+    if (location.hash === hash) route();
+    else location.hash = hash;
+  });
+
   el.refreshBtn.addEventListener('click', function () {
-    loadMeta();
+    refreshAll();
   });
 
   function route() {
+    state.view = location.hash === '#/daily' ? 'daily' : 'alerts';
+    renderView();
+    if (state.view === 'daily') return;
+
     var m = location.hash.match(/^#\/alert\/(.+)$/);
     if (!m) {
       if (state.selectedId) {
@@ -433,6 +570,6 @@
   }
 
   window.addEventListener('hashchange', route);
-  setInterval(loadMeta, 60000);
-  loadMeta().then(route);
+  setInterval(refreshAll, 60000);
+  refreshAll().then(route);
 })();
