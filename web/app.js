@@ -51,6 +51,15 @@
     return typeof s === 'string' && s.length >= 19 ? s.slice(11, 19) : (s || '—');
   }
 
+  function chainHtml(chain) {
+    var parts = String(chain || '').split(' <- ');
+    return parts.map(function (p, i) {
+      var root = i === parts.length - 1;
+      return '<span class="cx' + (root ? ' root' : '') + '" title="' + esc(p) + '">' +
+        esc(p.split('.').pop()) + '</span>';
+    }).join('<span class="arrow">←</span>');
+  }
+
   function localDate() {
     var d = new Date();
     var p = function (n) { return String(n).padStart(2, '0'); };
@@ -211,6 +220,7 @@
         rows.push({
           namespace: g.namespace || '',
           workload: g.workload || '',
+          chain: c.chain || c.exception || '',
           exception: c.exception || '',
           count: Number(c.count) || 0,
           first: c.first || '',
@@ -229,7 +239,7 @@
     return dailyRows().filter(function (r) {
       if (state.filters.ns && r.namespace !== state.filters.ns) return false;
       if (wl && r.workload.toLowerCase().indexOf(wl) === -1) return false;
-      if (kw && (r.exception + ' ' + r.message).toLowerCase().indexOf(kw) === -1) return false;
+      if (kw && (r.chain + ' ' + r.exception + ' ' + r.message).toLowerCase().indexOf(kw) === -1) return false;
       return true;
     });
   }
@@ -260,12 +270,12 @@
 
     el.dailyTable.innerHTML =
       '<table class="tbl">' +
-      '<thead><tr><th>工作负载</th><th>根因异常</th><th class="num">次数</th>' +
+      '<thead><tr><th>工作负载</th><th>异常链</th><th class="num">次数</th>' +
       '<th>首次出现</th><th>末次出现</th><th>代表消息</th></tr></thead>' +
       '<tbody>' + rows.map(function (r) {
         return '<tr>' +
           '<td><div class="wl-cell">' + esc(r.workload) + '</div><div class="ns-cell">' + esc(r.namespace) + '</div></td>' +
-          '<td class="mono">' + esc(r.exception) + '</td>' +
+          '<td class="chain">' + chainHtml(r.chain) + '</td>' +
           '<td class="num"><span class="cnt">' + esc(r.count) + '</span></td>' +
           '<td class="mono time">' + esc(hhmmss(r.first)) + '</td>' +
           '<td class="mono time">' + esc(hhmmss(r.last)) + '</td>' +

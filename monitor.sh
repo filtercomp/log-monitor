@@ -91,21 +91,32 @@ for f in *.log; do
 done
 if [ -n "$flist" ]; then
   awk -v today="$today" '
-    function flushblk(  k, full) {
+    function inchain(x,  i) {
+      for (i = 1; i <= chn; i++) if (ch[i] == x) return 1
+      return 0
+    }
+    function flushblk(  chain, full, i, k) {
       if (!inblk) return
-      k = (root != "") ? root : top
-      if (k == "" && match(msg, /[a-zA-Z_$][a-zA-Z0-9_$]*(\.[a-zA-Z_$][a-zA-Z0-9_$]*)*(Exception|Error|Throwable)/))
-        k = substr(msg, RSTART, RLENGTH)
-      if (k == "") k = "(no-stack)"
-      cnt[k]++
-      if (!(k in first)) first[k] = tsstr
-      last[k] = tsstr
-      if (!(k in samp)) {
+      if (chn > 0) {
+        chain = ch[1]
+        for (i = 2; i <= chn; i++) chain = chain " <- " ch[i]
+        k = ch[chn]
+      } else {
+        k = ""
+        if (match(msg, /[a-zA-Z_$][a-zA-Z0-9_$]*(\.[a-zA-Z_$][a-zA-Z0-9_$]*)*(Exception|Error|Throwable)/))
+          k = substr(msg, RSTART, RLENGTH)
+        chain = (k == "") ? "(no-stack)" : k
+        if (k == "") k = "(no-stack)"
+      }
+      cnt[chain]++
+      if (!(chain in first)) { first[chain] = tsstr; rootcls[chain] = k }
+      last[chain] = tsstr
+      if (!(chain in samp)) {
         full = msg
         if (rootmsg != "") full = msg " | " rootmsg
-        samp[k] = substr(full, 1, 400)
+        samp[chain] = substr(full, 1, 400)
       }
-      inblk = 0
+      inblk = 0; chn = 0
     }
     {
       if ($0 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/) {
@@ -117,7 +128,7 @@ if [ -n "$flist" ]; then
           msg = $0
           gsub(/\t/, " ", msg)
           msg = substr(msg, 1, 240)
-          root = ""; top = ""; rootmsg = ""
+          root = ""; top = ""; rootmsg = ""; chn = 0
         }
         next
       }
@@ -129,17 +140,21 @@ if [ -n "$flist" ]; then
         rootmsg = substr(c, 1, 200)
         sub(/:.*/, "", c)
         sub(/[ \t]+$/, "", c)
-        if (c != "") root = c
+        if (c != "") {
+          root = c
+          if (!inchain(c)) ch[++chn] = c
+        }
       } else if (top == "" && $0 ~ /^[a-zA-Z_$][a-zA-Z0-9_$.]*(Exception|Error|Throwable)([: ]|$)/) {
         t = $0
         sub(/:.*$/, "", t)
         sub(/[ \t].*$/, "", t)
         top = t
+        if (!inchain(t)) ch[++chn] = t
       }
     }
     END {
       flushblk()
-      for (k in cnt) printf "CAT\t%s\t%d\t%s\t%s\t%s\n", k, cnt[k], first[k], last[k], samp[k]
+      for (k in cnt) printf "CAT\t%s\t%s\t%d\t%s\t%s\t%s\n", k, rootcls[k], cnt[k], first[k], last[k], samp[k]
     }
   ' $flist
 fi
@@ -280,8 +295,8 @@ declare -A SRC_IDX=() SRC_WKEY=() SRC_POD=() SRC_CTR=() SRC_FILE=()
 declare -A SRC_MTIME=() SRC_MTIME_STR=() SRC_SIZE=() SRC_FCOUNT=() SRC_BODY_FILE=()
 declare -a SRC_ORDER=()
 
-# 当天错误归类聚合：键 = 工作负载|异常类
-declare -A DCNT=() DFIRST=() DLAST=() DSAMP=()
+# 当天错误归类聚合：键 = 工作负载|异常链
+declare -A DCNT=() DFIRST=() DLAST=() DSAMP=() DROOT=()
 declare -A DWL_SEEN=()
 declare -a DWL_ORDER=()
 SCAN_TMP=$(mktemp -d /tmp/log-monitor-scan.XXXXXX)
@@ -332,12 +347,12 @@ for ns in "${NS_LIST[@]}"; do
           @@LOGS-END) in_body=2 ;;
           CAT$'\t'*)
             if [ "$in_daily" = "1" ]; then
-              IFS=$'\t' read -r _tag catv cnum cfirst clast csamp <<< "$line"
+              IFS=$'\t' read -r _tag catv croot cnum cfirst clast csamp <<< "$line"
               if [ -n "$catv" ]; then
                 if [ -z "${DWL_SEEN[$wkey]:-}" ]; then DWL_SEEN["$wkey"]=1; DWL_ORDER+=("$wkey"); fi
                 dkey="$wkey|$catv"
                 if [ -z "${DCNT[$dkey]:-}" ]; then
-                  DCNT["$dkey"]=$cnum; DFIRST["$dkey"]=$cfirst; DLAST["$dkey"]=$clast; DSAMP["$dkey"]=$csamp
+                  DCNT["$dkey"]=$cnum; DFIRST["$dkey"]=$cfirst; DLAST["$dkey"]=$clast; DSAMP["$dkey"]=$csamp; DROOT["$dkey"]=$croot
                 else
                   DCNT["$dkey"]=$(( DCNT[$dkey] + cnum ))
                   [[ "$cfirst" < "${DFIRST[$dkey]}" ]] && DFIRST["$dkey"]=$cfirst
@@ -415,9 +430,9 @@ for wkey2 in "${DWL_ORDER[@]}"; do
   for dkey in "${!DCNT[@]}"; do
     [ "${dkey#"$prefix"}" != "$dkey" ] || continue
     catv="${dkey#"$prefix"}"
-    jq -n --arg exception "$catv" --argjson count "${DCNT[$dkey]}" \
+    jq -n --arg chain "$catv" --arg exception "${DROOT[$dkey]:-$catv}" --argjson count "${DCNT[$dkey]}" \
         --arg first "${DFIRST[$dkey]}" --arg last "${DLAST[$dkey]}" --arg message "${DSAMP[$dkey]}" \
-        '{exception:$exception, count:$count, first:$first, last:$last, message:$message}' >> "$tmpcats"
+        '{chain:$chain, exception:$exception, count:$count, first:$first, last:$last, message:$message}' >> "$tmpcats"
   done
   wns2="${wkey2%%|*}"; wl2="${wkey2#*|}"
   jq -n --arg namespace "$wns2" --arg workload "$wl2" --slurpfile cats "$tmpcats" \
@@ -428,9 +443,9 @@ if jq -n --arg date "$TODAY" --arg now "$SCAN_TIME" --arg cluster "$CLUSTER_NAME
       groups:($groups | sort_by(-([.categories[].count] | add // 0)))}' > "$DAILY_JSON.tmp" 2>/dev/null; then
   mv "$DAILY_JSON.tmp" "$DAILY_JSON"
   {
-    printf '\xEF\xBB\xBF命名空间,工作负载,根因异常,次数,首次出现,末次出现,代表消息\n'
+    printf '\xEF\xBB\xBF命名空间,工作负载,异常链,根因异常,次数,首次出现,末次出现,代表消息\n'
     jq -r '.groups[] | . as $g | .categories[] |
-      [$g.namespace, $g.workload, .exception, (.count|tostring), .first, .last, .message] | @csv' \
+      [$g.namespace, $g.workload, .chain, .exception, (.count|tostring), .first, .last, .message] | @csv' \
       "$DAILY_JSON" 2>/dev/null
   } > "$DAILY_CSV.tmp" && mv "$DAILY_CSV.tmp" "$DAILY_CSV" || rm -f "$DAILY_CSV.tmp"
 else
