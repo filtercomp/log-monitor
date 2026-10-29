@@ -91,7 +91,7 @@ for f in *.log; do
 done
 if [ -n "$flist" ]; then
   awk -v today="$today" '
-    function flushblk(  k) {
+    function flushblk(  k, full) {
       if (!inblk) return
       k = (root != "") ? root : top
       if (k == "" && match(msg, /[a-zA-Z_$][a-zA-Z0-9_$]*(\.[a-zA-Z_$][a-zA-Z0-9_$]*)*(Exception|Error|Throwable)/))
@@ -100,7 +100,11 @@ if [ -n "$flist" ]; then
       cnt[k]++
       if (!(k in first)) first[k] = tsstr
       last[k] = tsstr
-      if (!(k in samp)) samp[k] = msg
+      if (!(k in samp)) {
+        full = msg
+        if (rootmsg != "") full = msg " | " rootmsg
+        samp[k] = substr(full, 1, 400)
+      }
       inblk = 0
     }
     {
@@ -110,12 +114,10 @@ if [ -n "$flist" ]; then
         if ($0 ~ /ERROR/) {
           inblk = 1
           tsstr = substr($0, 1, 19)
-          m = $0
-          sub(/^.*ERROR/, "", m)
-          sub(/^[ \t:|-]+/, "", m)
-          gsub(/\t/, " ", m)
-          msg = substr(m, 1, 160)
-          root = ""; top = ""
+          msg = $0
+          gsub(/\t/, " ", msg)
+          msg = substr(msg, 1, 240)
+          root = ""; top = ""; rootmsg = ""
         }
         next
       }
@@ -123,6 +125,8 @@ if [ -n "$flist" ]; then
       if ($0 ~ /^Caused by:/) {
         c = $0
         sub(/^Caused by:[ \t]*/, "", c)
+        gsub(/\t/, " ", c)
+        rootmsg = substr(c, 1, 200)
         sub(/:.*/, "", c)
         sub(/[ \t]+$/, "", c)
         if (c != "") root = c
