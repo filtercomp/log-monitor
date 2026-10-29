@@ -113,10 +113,10 @@ if [ -n "$flist" ]; then
       last[chain] = tsstr
       if (!(chain in samp)) {
         full = msg
-        if (rootmsg != "") full = msg " | " rootmsg
-        samp[chain] = substr(full, 1, 400)
+        for (i = 1; i <= excn; i++) full = full " | " ex[i]
+        samp[chain] = substr(full, 1, 1500)
       }
-      inblk = 0; chn = 0
+      inblk = 0; chn = 0; excn = 0
     }
     {
       if ($0 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/) {
@@ -128,28 +128,35 @@ if [ -n "$flist" ]; then
           msg = $0
           gsub(/\t/, " ", msg)
           msg = substr(msg, 1, 240)
-          root = ""; top = ""; rootmsg = ""; chn = 0
+          root = ""; top = ""; chn = 0; excn = 0
         }
         next
       }
       if (!inblk) next
       if ($0 ~ /^Caused by:/) {
+        line = $0
+        gsub(/\t/, " ", line)
+        line = substr(line, 1, 200)
         c = $0
         sub(/^Caused by:[ \t]*/, "", c)
-        gsub(/\t/, " ", c)
-        rootmsg = substr(c, 1, 200)
         sub(/:.*/, "", c)
         sub(/[ \t]+$/, "", c)
-        if (c != "") {
+        if (c != "" && !inchain(c)) {
+          ch[++chn] = c
+          ex[++excn] = line
           root = c
-          if (!inchain(c)) ch[++chn] = c
         }
       } else if (top == "" && $0 ~ /^[a-zA-Z_$][a-zA-Z0-9_$.]*(Exception|Error|Throwable)([: ]|$)/) {
         t = $0
         sub(/:.*$/, "", t)
         sub(/[ \t].*$/, "", t)
         top = t
-        if (!inchain(t)) ch[++chn] = t
+        if (!inchain(t)) {
+          line = $0
+          gsub(/\t/, " ", line)
+          ch[++chn] = t
+          ex[++excn] = substr(line, 1, 200)
+        }
       }
     }
     END {

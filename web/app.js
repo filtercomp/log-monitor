@@ -60,6 +60,10 @@
     }).join('<span class="arrow">←</span>');
   }
 
+  function msgHtml(message) {
+    return String(message || '').split(' | ').map(esc).join('<br>');
+  }
+
   function localDate() {
     var d = new Date();
     var p = function (n) { return String(n).padStart(2, '0'); };
@@ -279,7 +283,7 @@
           '<td class="num"><span class="cnt">' + esc(r.count) + '</span></td>' +
           '<td class="mono time">' + esc(hhmmss(r.first)) + '</td>' +
           '<td class="mono time">' + esc(hhmmss(r.last)) + '</td>' +
-          '<td class="msg" title="' + esc(r.message) + '">' + esc(r.message) + '</td>' +
+          '<td class="msg" title="' + esc(r.message) + '">' + msgHtml(r.message) + '</td>' +
           '</tr>';
       }).join('') + '</tbody></table>';
   }

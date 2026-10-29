@@ -550,14 +550,10 @@ mark {
 
 .tbl .msg {
   min-width: 340px;
-  max-width: 620px;
   color: var(--text-sub);
-  line-height: 1.5;
+  line-height: 1.55;
   word-break: break-all;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  white-space: normal;
 }
 
 .wl-cell { font-weight: 600; word-break: break-all; }
