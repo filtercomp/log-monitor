@@ -173,6 +173,8 @@
 
   function renderList() {
     var items = visibleAlerts();
+    // 仍在报错的置前，已恢复的置后
+    items.sort(function (a, b) { return (a.recovered ? 1 : 0) - (b.recovered ? 1 : 0); });
     el.alertCount.textContent = items.length === state.alerts.length
       ? String(items.length)
       : items.length + ' / ' + state.alerts.length;
@@ -184,8 +186,10 @@
     }
 
     el.alertList.innerHTML = items.map(function (a) {
+      var rec = a.recovered === true;
       var chips = '<span class="chip">' + esc(a.namespace) + '</span>' +
         '<span class="chip">' + esc(a.hits) + ' 个 Pod/容器</span>';
+      if (rec) chips += '<span class="chip ok">已恢复</span>';
       if (Number(a.error_count) > 0) {
         chips += '<span class="chip err">ERROR ' + esc(a.error_count) + '</span>';
       }
@@ -193,9 +197,9 @@
         chips += '<span class="chip err">Exception ' + esc(a.exception_count) + '</span>';
       }
       return '<button type="button" class="alert-item' + (a.id === state.selectedId ? ' active' : '') +
-        '" data-id="' + esc(a.id) + '">' +
+        (rec ? ' recovered' : '') + '" data-id="' + esc(a.id) + '">' +
         '<div class="arow1"><span class="wl">' + esc(a.workload) + '</span>' +
-        '<span class="atime">' + esc(hhmmss(a.scan_time)) + '</span></div>' +
+        '<span class="atime">' + esc(rec ? hhmmss(a.recovered_at) : hhmmss(a.scan_time)) + '</span></div>' +
         '<div class="arow2">' + chips + '</div>' +
         '<div class="arow3">' + esc(a.file) + ' · ' + esc(a.size_human) + '</div>' +
         '</button>';
@@ -352,6 +356,7 @@
 
   function renderDetail(a) {
     var badges = '';
+    if (a.recovered === true) badges += '<span class="badge ok">已恢复</span>';
     if (Number(a.error_count) > 0) badges += '<span class="badge">ERROR ' + esc(a.error_count) + '</span>';
     if (Number(a.exception_count) > 0) badges += '<span class="badge">Exception ' + esc(a.exception_count) + '</span>';
     if (!badges) badges = '<span class="badge neutral">无 ERROR 关键字</span>';
@@ -406,6 +411,9 @@
         '<div class="meta-item"><span>日志副本</span><strong>' + esc(sources.length) + ' 份</strong></div>' +
         '<div class="meta-item wide"><span>受影响 Pod（共 ' + esc(a.hits) + ' 个 Pod/容器）</span>' +
           '<div class="pods">' + podChips + '</div></div>' +
+        (a.recovered === true
+          ? '<div class="meta-item"><span>恢复时间</span><strong class="value mono">' + esc(a.recovered_at) + '</strong></div>'
+          : '') +
         linkRow +
       '</div>' +
       sourceBar +

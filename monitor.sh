@@ -240,16 +240,15 @@ state_remove() {  # wkey
   fi
 }
 
-# 删除页面记录及其日志快照
-drop_record() {  # id
-  local id="$1" tmp="$META_FILE.tmp.$$" s
+# 把页面记录标记为已恢复（保留到跨天清空，便于当天回顾）
+mark_recovered() {  # id
+  local id="$1" tmp="$META_FILE.tmp.$$"
   [ -z "$id" ] && return 0
   [ -s "$META_FILE" ] || return 0
-  while IFS= read -r s; do
-    [ -n "$s" ] && rm -f "$DATA_DIR/logs/$s.json" 2>/dev/null
-  done < <(jq -r --arg i "$id" '(.alerts // [])[] | select(.id == $i) | (.sources // [])[]? | .snapshot // empty' "$META_FILE" 2>/dev/null)
   if jq --arg i "$id" --arg now "$SCAN_TIME" '
-      .alerts = ((.alerts // []) | map(select(.id != $i)))
+      .alerts = ((.alerts // []) | map(
+        if .id == $i then (.recovered = true | .recovered_at = (.recovered_at // $now))
+        else . end))
       | .updated_at = $now
     ' "$META_FILE" > "$tmp" 2>/dev/null; then
     mv "$tmp" "$META_FILE"
@@ -640,7 +639,6 @@ for k in "${STATE_KEYS[@]}"; do
   # 从未告警过或已恢复：冷却期结束后清理状态，冷却期内保留上次告警时间
   if [ "$p_alerted" != "true" ]; then
     if [ $(( NOW - p_lts )) -ge $(( RENOTIFY_HOURS * 3600 )) ]; then
-      drop_record "$p_id"
       state_remove "$k"
     fi
     continue
@@ -649,6 +647,9 @@ for k in "${STATE_KEYS[@]}"; do
   if [ $(( NOW - p_lmt )) -lt $(( RECOVERY_MINUTES * 60 )) ]; then
     continue
   fi
+
+  # 已连续无新增错误：页面记录标记为已恢复，当天保留
+  mark_recovered "$p_id"
 
   if [ "$SEND_ALLOWED" != "true" ]; then
     log "非告警时段，恢复通知顺延：${p_ns}/${p_wl}（最后错误 ${p_lmstr}）"
@@ -668,8 +669,7 @@ for k in "${STATE_KEYS[@]}"; do
 
   if send_wecom "$msg"; then
     log "已发送恢复：${p_ns}/${p_wl}（最后错误 ${p_lmstr}）"
-    drop_record "$p_id"
-    # 保留 last_alert_ts，冷却期内再次报错不重复告警
+    # 保留 last_alert_ts，冷却期内再次报错不重复告警；页面记录保留为「已恢复」
     state_set "$k" "$p_ns" "$p_wl" false "$p_lts" "$p_lmt" "$p_lmstr" "$p_id" "$p_file" "$p_hits"
   else
     log "恢复通知发送失败，下个巡检周期重试：${p_ns}/${p_wl}"

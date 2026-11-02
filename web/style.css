@@ -226,6 +226,8 @@ body {
 .alert-item + .alert-item { margin-top: 2px; }
 .alert-item:hover { background: #f6f8fb; }
 .alert-item.active { background: var(--accent-soft); }
+.alert-item.recovered { opacity: 0.6; }
+.alert-item.recovered .wl { font-weight: 500; }
 
 .arow1 {
   display: flex;
@@ -256,6 +258,7 @@ body {
 }
 
 .chip.err { background: var(--danger-soft); color: var(--danger); }
+.chip.ok { background: #eaf7ef; color: #2f7d55; }
 
 .arow3 {
   margin-top: 7px;
@@ -299,6 +302,7 @@ body {
 }
 
 .badge.neutral { background: #f1f3f6; color: var(--text-sub); }
+.badge.ok { background: #eaf7ef; color: #2f7d55; }
 
 .meta-grid {
   display: grid;
