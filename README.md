@@ -145,6 +145,7 @@ kubectl config current-context   # 先确认集群没连错
 | --- | --- | --- |
 | `CLUSTER_NAME` | `cn-prod` | 集群名称 |
 | `ERROR_LOG_DIR` | `/tmp/logs/error` | 容器内错误日志目录 |
+| `KUBECTL_VERSION` | 空（回落 1.37） | 容器内使用的 kubectl 版本，镜像预装 1.30-1.37，需与集群 API Server 同小版本 |
 | `SCAN_INTERVAL_SECONDS` | `300` | 巡检间隔（秒） |
 | `ACTIVE_HOURS` | `9-17` | 运行时段，含两端小时（09:00-17:59）；时段外只更新页面不发消息 |
 | `RECENT_WINDOW_MINUTES` | `6` | 每次巡检回看窗口（分钟） |

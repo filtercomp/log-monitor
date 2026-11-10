@@ -16,6 +16,9 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 : "${CLUSTER_NAME:=cn-prod}"
+# 与集群版本匹配的 kubectl 版本（镜像内预装多份，由 /usr/local/bin/kubectl 分发）
+: "${KUBECTL_VERSION:=}"
+export KUBECTL_VERSION
 : "${ERROR_LOG_DIR:=/tmp/logs/error}"
 : "${MAX_MESSAGES:=20}"
 : "${INCLUDE_NAMESPACES:=}"
