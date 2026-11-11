@@ -33,6 +33,8 @@ export KUBECTL_VERSION
 : "${RECOVERY_MINUTES:=20}"
 : "${RENOTIFY_HOURS:=2}"
 : "${ACTIVE_HOURS:=9-17}"
+# 业务报错白名单（ERE）：命中的异常块既不告警也不进当天归类，多个用 | 分隔
+: "${IGNORE_ERROR_PATTERNS:=}"
 
 # ACTIVE_HOURS=9-17 表示 09:00-17:59（含两端的小时）；时段外只更新页面与状态，不推送
 SEND_ALLOWED=false
@@ -73,10 +75,10 @@ send_wecom() {
   esac
 }
 
-# 在容器内执行的探测脚本（由远端 sh 执行，参数：日志目录 起始时间戳 行数 当天日期）
+# 在容器内执行的探测脚本（由远端 sh 执行，参数：日志目录 起始时间戳 行数 当天日期 忽略正则）
 # 输出两部分：1) 当天全部日志的错误归类（CAT 行，tab 分隔）；2) 窗口内最新文件的快照
 read -r -d '' PROBE <<'EOS' || true
-d="$1"; since="$2"; n="$3"; today="$4"
+d="$1"; since="$2"; n="$3"; today="$4"; ig="$5"
 [ -d "$d" ] || exit 3
 cd "$d" || exit 3
 echo "@@DAILY-BEGIN"
@@ -93,13 +95,14 @@ for f in *.log; do
   esac
 done
 if [ -n "$flist" ]; then
-  awk -v today="$today" '
+  awk -v today="$today" -v ig="$ig" '
     function inchain(x,  i) {
       for (i = 1; i <= chn; i++) if (ch[i] == x) return 1
       return 0
     }
     function flushblk(  chain, full, i, k) {
       if (!inblk) return
+      if (ig != "" && txt ~ ig) { inblk = 0; chn = 0; excn = 0; txt = ""; return }
       if (chn > 0) {
         chain = ch[1]
         for (i = 2; i <= chn; i++) chain = chain " <- " ch[i]
@@ -119,7 +122,7 @@ if [ -n "$flist" ]; then
         for (i = 1; i <= excn; i++) full = full " | " ex[i]
         samp[chain] = substr(full, 1, 1500)
       }
-      inblk = 0; chn = 0; excn = 0
+      inblk = 0; chn = 0; excn = 0; txt = ""
     }
     {
       if ($0 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/) {
@@ -131,11 +134,13 @@ if [ -n "$flist" ]; then
           msg = $0
           gsub(/\t/, " ", msg)
           msg = substr(msg, 1, 240)
+          txt = $0
           root = ""; top = ""; chn = 0; excn = 0
         }
         next
       }
       if (!inblk) next
+      if (length(txt) < 4000) txt = txt "\n" $0
       if ($0 ~ /^Caused by:/) {
         line = $0
         gsub(/\t/, " ", line)
@@ -185,6 +190,25 @@ echo "@@FILE=$newest"
 echo "@@MTIME=$newest_mt"
 echo "@@SIZE=$newest_sz"
 echo "@@MTIME_STR=$(date '+%F %T' -r "$newest" 2>/dev/null)"
+# 最新文件里未被忽略规则命中的 ERROR 块数；为 0 表示窗口内只有业务报错，不告警
+if [ -n "$ig" ]; then
+  eff=$(tail -n "$n" "$newest" | awk -v ig="$ig" '
+    function flushblk() {
+      if (!inblk) return
+      if (txt !~ ig) c++
+      inblk = 0; txt = ""
+    }
+    /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/ {
+      flushblk()
+      if ($0 ~ /ERROR/) { inblk = 1; txt = $0 }
+      next
+    }
+    { if (inblk && length(txt) < 4000) txt = txt "\n" $0 }
+    END { flushblk(); print c + 0 }')
+else
+  eff=1
+fi
+echo "@@ERRS=$eff"
 echo "@@LOGS-BEGIN"
 tail -n "$n" "$newest"
 echo "@@LOGS-END"
@@ -290,7 +314,7 @@ for ns in "${ALL_NS[@]}"; do
   [ "$skip" = "0" ] && NS_LIST+=("$ns")
 done
 
-log "扫描命名空间：${NS_LIST[*]:-<无>}，窗口 ${RECENT_WINDOW_MINUTES} 分钟，快照 ${SNAPSHOT_LINES} 行，告警发送=$SEND_ALLOWED"
+log "扫描命名空间：${NS_LIST[*]:-<无>}，窗口 ${RECENT_WINDOW_MINUTES} 分钟，快照 ${SNAPSHOT_LINES} 行，告警发送=$SEND_ALLOWED，忽略规则=${IGNORE_ERROR_PATTERNS:-<无>}"
 
 # 同一工作负载（Deployment/StatefulSet 等）的多个 Pod 聚合为一条告警
 declare -A POD_WL=() RS_WL=()
@@ -338,14 +362,15 @@ for ns in "${NS_LIST[@]}"; do
       [ -z "$c" ] && continue
       if printf '%s' "$c" | grep -qE "$EXCLUDE_CONTAINERS"; then continue; fi
 
-      raw=$(timeout 40 kubectl exec -n "$ns" "$pod" -c "$c" -- sh -c "$PROBE" sh "$ERROR_LOG_DIR" "$SINCE" "$SNAPSHOT_LINES" "$TODAY" 2>/dev/null)
+      raw=$(timeout 40 kubectl exec -n "$ns" "$pod" -c "$c" -- sh -c "$PROBE" sh "$ERROR_LOG_DIR" "$SINCE" "$SNAPSHOT_LINES" "$TODAY" "$IGNORE_ERROR_PATTERNS" 2>/dev/null)
       rc=$?
 
       # 解析返回块：先收当天归类（rc=4 时也有），再收窗口快照
-      fname=""; fsize=""; fmtime=""; fmstr=""; fcount="0"; body=""; in_body=0; in_daily=0
+      fname=""; fsize=""; fmtime=""; fmstr=""; fcount="0"; ferrs=1; body=""; in_body=0; in_daily=0
       while IFS= read -r line; do
         case "$line" in
           @@COUNT=*) fcount="${line#@@COUNT=}" ;;
+          @@ERRS=*) ferrs="${line#@@ERRS=}" ;;
           @@FILE=*) fname="${line#@@FILE=}" ;;
           @@MTIME=*) fmtime="${line#@@MTIME=}" ;;
           @@MTIME_STR=*) fmstr="${line#@@MTIME_STR=}" ;;
@@ -381,6 +406,9 @@ for ns in "${NS_LIST[@]}"; do
       fi
 
       [ -z "$fname" ] && continue
+
+      # 窗口内只有业务报错（命中 IGNORE_ERROR_PATTERNS）时不计入告警
+      if [ "$ferrs" = "0" ]; then continue; fi
 
       # 按工作负载聚合：记录所有副本，日志正文按 Pod/容器 各自落一份临时文件
       if [ -z "${AGG_SEEN[$wkey]:-}" ]; then

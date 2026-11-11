@@ -156,6 +156,7 @@ kubectl config current-context   # 先确认集群没连错
 | `INCLUDE_NAMESPACES` | 空 | 只扫描这些命名空间 |
 | `EXCLUDE_NAMESPACES` | `kube-system,kube-public,kube-node-lease` | 排除的命名空间 |
 | `EXCLUDE_CONTAINERS` | `^(istio-proxy\|linkerd-proxy\|.*-init)$` | 跳过 sidecar / init 容器 |
+| `IGNORE_ERROR_PATTERNS` | 空 | 业务报错忽略规则（ERE 正则，命中整段异常文本即忽略：不告警、不进当天归类），多个用 `\|` 分隔 |
 | `DRY_RUN` | `false` | `true` 时只打印不推送 |
 | `WEB_BASE_URL` | 空 | 告警中的页面链接前缀 |
 
