@@ -9,9 +9,10 @@ Kubernetes 集群内的轻量错误日志监控与告警工具，不需要部署
 - **无侵入采集**：不要求业务改造，也不需要 sidecar 或日志采集 DaemonSet
 - **按工作负载聚合**：同一 Deployment 的多个副本合并为一条告警，避免重复消息
 - **告警降噪**：同一工作负载每 2 小时最多一条告警，20 分钟无新增错误发送恢复通知
+- **业务报错过滤**：`IGNORE_ERROR_PATTERNS` 命中的异常块（如"账户积分余额不足"这类业务提示）不告警、不进归类
 - **保留每个副本**：每个 Pod/容器 各存一份日志快照，页面可切换副本查看
 - **告警精简**：只发集群、命名空间、工作负载、受影响副本数、ERROR/Exception 统计和页面链接，不内嵌日志正文
-- **内置页面**：告警列表、命名空间/工作负载筛选、关键字高亮、只看匹配行、100/200/1000/2000 行切换
+- **内置页面**：告警列表（恢复后灰化并标注「已恢复」）、当天错误归类表格 + CSV 下载、命名空间/工作负载筛选、关键字高亮、只看匹配行、100/200/1000/2000 行切换
 - **多环境部署**：CN 使用 ALB Ingress，海外环境使用 APISIX（ApisixRoute + ApisixUpstream）
 
 ## 工作原理
@@ -31,7 +32,8 @@ scheduler.sh (PID 1)
 - 默认运行时段：`09:00-17:59`（Asia/Shanghai），时段外只刷新页面不发消息
 - 检测窗口：最近 `RECENT_WINDOW_MINUTES`（默认 6）分钟内有写入的日志文件
 - 重复提醒：同一工作负载每 `RENOTIFY_HOURS`（默认 2）小时最多发一条告警，首次和持续报错都适用
-- 恢复判定：连续 `RECOVERY_MINUTES`（默认 20）分钟无新增错误，发送一次恢复通知并清除页面记录
+- 恢复判定：连续 `RECOVERY_MINUTES`（默认 20）分钟无新增错误，发送一次恢复通知，页面记录保留并标注「已恢复」，跨天清空
+- 业务报错过滤：`IGNORE_ERROR_PATTERNS` 以 ERE 正则匹配「ERROR 行 + 其下堆栈/Caused by」组成的整块文本，命中即整块忽略（不告警、不进当天归类）；窗口内只剩被忽略的报错时视为无异常，状态机不推进
 - 恢复不清除上次告警时间：冷却期内（距上次告警不足 2 小时）再次报错只更新页面，不发消息；冷却结束后才重新告警
 - 时段外不发送任何消息；此时若已满足恢复条件，恢复通知会顺延到下一个时段内的巡检再发
 - 数据只保留当天，跨天自动清空
@@ -56,7 +58,8 @@ scheduler.sh (PID 1)
 │       ├── eu/               # APISIX
 │       └── usw/              # APISIX
 ├── docker/
-│   ├── Dockerfile
+│   ├── Dockerfile                # 多阶段构建，预装 kubectl 1.30-1.37
+│   ├── kubectl-wrapper.sh        # 按 KUBECTL_VERSION 分发对应版本二进制
 │   └── lighttpd.conf
 └── web/                      # 纯静态页面（HTML/CSS/JS）
 ```
@@ -72,8 +75,8 @@ scheduler.sh (PID 1)
 ### 1. 构建并推送镜像
 
 ```bash
-docker build -t <your-registry>/log-monitor:1.3.0 -f docker/Dockerfile .
-docker push <your-registry>/log-monitor:1.3.0
+docker build -t <your-registry>/log-monitor:1.5.0 -f docker/Dockerfile .
+docker push <your-registry>/log-monitor:1.5.0
 ```
 
 ### 2. 修改环境配置
@@ -87,6 +90,7 @@ vi deploy/envs/cn/monitor.env
 | 变量 | 说明 |
 | --- | --- |
 | `CLUSTER_NAME` | 告警中显示的集群名称 |
+| `KUBECTL_VERSION` | 与集群 API Server 同小版本的 kubectl（镜像预装 1.30-1.37） |
 | `INCLUDE_NAMESPACES` | 要监控的命名空间，逗号分隔；留空则扫描全部（再排除 `EXCLUDE_NAMESPACES`） |
 | `WEB_BASE_URL` | 页面访问地址，需与 `gateway.yaml` 中的 host 一致 |
 | `IMAGE` | 镜像地址 |
@@ -202,6 +206,7 @@ spec:
 - 日志快照存放在内存（`emptyDir`，默认上限 256Mi），只保留当天
 - Pod 重建后，重建前的快照不可恢复
 - 页面每 60 秒自动刷新告警列表；日志正文在点开某条告警时才读取。页面上的「刷新」按钮只是重新读取 `alerts.json`，不会触发扫描
+- `IGNORE_ERROR_PATTERNS` 只对每个异常块的前 4000 字符做匹配，超长堆栈靠后的内容不参与
 - 时区固定为 `Asia/Shanghai`
 
 ## License

@@ -5,8 +5,9 @@
 # 告警降噪：
 #   1. 首次发现错误立即告警；
 #   2. 同一工作负载每 RENOTIFY_HOURS 小时最多发送一条告警（无论首次还是持续）；
-#   3. 连续 RECOVERY_MINUTES 分钟无新增错误后发送一次恢复通知，并清除页面记录；
-#   4. 恢复不清除上次告警时间，冷却期内再次报错只更新页面、不发消息。
+#   3. 连续 RECOVERY_MINUTES 分钟无新增错误后发送一次恢复通知，页面记录标注为「已恢复」并保留到跨天；
+#   4. 恢复不清除上次告警时间，冷却期内再次报错只更新页面、不发消息；
+#   5. 命中 IGNORE_ERROR_PATTERNS 的业务报错整块忽略：不告警、不进当天归类。
 set -uo pipefail
 
 CONFIG_FILE="${CONFIG_FILE:-/config/monitor.env}"
